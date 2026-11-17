@@ -76,7 +76,10 @@ def run_gates(profile, home, source, at_epoch=None):
     gates.append(("disk", free >= ceiling,
                   "%.1f GB free against a %.0f GB watch ceiling"
                   % (free / 1e9, ceiling / 1e9)))
-    problems = profilemod.validate(profile)
+    try:
+        problems = profilemod.validate(profile)
+    except profilemod.ProfileError as exc:
+        problems = [str(exc)]
     gates.append(("profile", not problems,
                   "; ".join(problems) if problems else "profile valid"))
     lat, lon = profile["home"]["lat"], profile["home"]["lon"]
@@ -108,6 +111,7 @@ def gates_passed(gates):
 
 
 def doctor_text(profile, home):
+    from .desks import bench_reasons
     from .sim import SimSource
     fallback = None
     if profile["source"]["kind"] == "real":
@@ -136,11 +140,26 @@ def doctor_text(profile, home):
                       "coverage account" % fallback)
         lines.append("- %s: %s - %s" % (name, "PASS" if ok else "FAIL",
                                         detail))
+    # One bench computation for every surface: capability benches,
+    # the muster ephemeris bench, and the profile roster together,
+    # so the doctor cannot disagree with a watch's own account.
+    sats, _path = load_sats(profile)
+    extra = {}
+    if not sats:
+        extra["satellite"] = "no orbital elements loaded at muster"
+    else:
+        age = orbit.tle_age_days(sats, time.time())
+        if age is not None and age > 30:
+            extra["satellite"] = ("orbital elements %.0f days old, "
+                                  "over the 30-day rule" % age)
+    benched = bench_reasons(profile, source.kind, capabilities, extra)
     lines.append("Desk inventory (tier, state, reason):")
     for name in sorted(SPECS):
         tier, service, _cpu, _ch = SPECS[name]
-        state, reason = desk_state(name, profile, source.kind,
-                                   capabilities)
+        if name in benched:
+            state, reason = "benched", benched[name]
+        else:
+            state, reason = "standing", None
         line = "- %s (tier %d, %s): %s" % (name, tier, service, state)
         if reason:
             line += " - %s" % reason

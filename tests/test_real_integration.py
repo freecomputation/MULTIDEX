@@ -32,7 +32,14 @@ STILL_BENCHED = {"acars", "amateur", "digitalvoice", "hfdl", "iss",
 def _profile_file(tmp_path):
     text = open(os.path.join(ROOT, "profiles",
                              "default.toml")).read()
-    text = text.replace("hours = 24", "hours = 1")
+    # Two hours, and no deep-sweep window: the bill's composition
+    # must not depend on the wall-clock hour the suite happens to
+    # run at. A one-hour bill started inside the deep-sweep window
+    # (or beside the sonde windows) can hold no pager dwell at all,
+    # which made this test fail or pass by the clock.
+    text = text.replace("hours = 24", "hours = 2")
+    text = text.replace("deep_sweep_start = 1", "deep_sweep_start = 0")
+    text = text.replace("deep_sweep_end = 4", "deep_sweep_end = 0")
     text = text.replace("sitrep_hours = 6", "sitrep_hours = 1")
     text = text.replace("disk_ceiling_gb = 20", "disk_ceiling_gb = 0.05")
     text = text.replace("time_scale = 1.0", "time_scale = 100000.0")

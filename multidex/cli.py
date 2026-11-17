@@ -116,12 +116,23 @@ def cmd_sitrep(args):
 def cmd_stop(args):
     home = _home(args)
     # The stop must land in the folder of the watch actually
-    # running: the pointer is validated against the disk, and a
-    # stale pointer resolves to the newest incomplete watch.
-    watch_id = products.resolve_current_watch(home)
-    if not watch_id:
-        print("No watch is running.")
+    # running: a watch is running only when the pid its state file
+    # recorded is still alive. A dead watch gets no flag and no
+    # promise of a stand-down; the pointer alone proves nothing.
+    live_id, claimed_id = products.watch_liveness(home)
+    if live_id:
+        watch_id = live_id
+    elif claimed_id:
+        print("No watch is running. Watch %s stands interrupted; "
+              "there is no officer process to stand down."
+              % claimed_id)
         return 1
+    else:
+        watch_id = products.resolve_current_watch(home)
+        if not watch_id \
+                or products._watch_state(home, watch_id) is None:
+            print("No watch is running.")
+            return 1
     flag = os.path.join(home, "watches", watch_id, "stop.flag")
     with open(flag, "w") as fh:
         fh.write("stop requested\n")

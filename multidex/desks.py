@@ -110,6 +110,31 @@ def desk_state(name, profile, source_kind, capabilities):
     return "standing", None
 
 
+def bench_reasons(profile, source_kind, capabilities, extra_bench=None,
+                  supervisor_benched=None):
+    """The one bench computation every surface reads.
+
+    Returns {desk: reason} for every benched desk, combining the
+    muster benches (extra_bench, including the ephemeris bench), the
+    supervisor's mid-watch benches, and the capability and roster
+    benches from desk_state. Officer state saves, the status verb,
+    the doctor, and the muster desk_health events all read this, so
+    no two surfaces can disagree about which desks are down.
+    """
+    out = {}
+    for name in SPECS:
+        if extra_bench and name in extra_bench:
+            out[name] = extra_bench[name]
+        elif supervisor_benched and name in supervisor_benched:
+            out[name] = supervisor_benched[name]
+        else:
+            state, reason = desk_state(name, profile, source_kind,
+                                       capabilities)
+            if state == "benched":
+                out[name] = reason
+    return out
+
+
 # ------------------------------------------------------------- snippets
 
 def _seed_int(key):
@@ -161,6 +186,11 @@ def _snippet(data_bytes, filename, kind):
 
 _adsb_pending = {}
 
+# CPR global decode is only valid for an even/odd frame pair received
+# within this many seconds of each other (the airborne CPR pairing
+# window). A frame older than the window is expired, never paired.
+CPR_PAIR_WINDOW_S = 10.0
+
 
 def reset_state():
     _adsb_pending.clear()
@@ -185,10 +215,15 @@ def process_adsb(feed, ctx):
         elif 9 <= tc <= 18:
             parity = modes.frame_parity(frame)
             slot = _adsb_pending.setdefault(icao, {})
-            slot[parity] = frame
+            # Expire any pending frame outside the pairing window
+            # before it can stitch a stale global position.
+            for p in list(slot):
+                if abs(ctx["t0"] - slot[p][1]) > CPR_PAIR_WINDOW_S:
+                    del slot[p]
+            slot[parity] = (frame, ctx["t0"])
             partner = slot.get(1 - parity)
             if partner is not None:
-                pos = modes.decode_position(frame, partner)
+                pos = modes.decode_position(frame, partner[0])
                 grade, how = "CONFIRMED", "cpr-global"
             else:
                 pos = modes.decode_position(frame, ref=ctx["home"])
@@ -308,12 +343,19 @@ def process_ais(feed, ctx):
 def process_wxradio(feed, ctx):
     out = []
     if feed.get("present"):
+        # Presence here is signal energy over a threshold, not a
+        # decoded broadcast: it files as a PROBABLE census. CONFIRMED
+        # is reserved for an actually decoded SAME header, below.
+        data = {"emitter_kind": "station"}
+        if feed.get("same_note"):
+            data["same_note"] = feed["same_note"]
         out.append(make_event(
             ctx["watch_id"], "wxradio", "census", ctx["t0"], ctx["t1"],
             freq_hz=feed.get("freq_hz", 162.475e6),
-            emitter="NOAA Weather Radio", grade="CONFIRMED",
-            content="weather radio broadcast present",
-            data={"emitter_kind": "station"}))
+            emitter="NOAA Weather Radio", grade="PROBABLE",
+            content="weather radio broadcast present (signal energy; "
+                    "no SAME header decoded this dwell)",
+            data=data))
     for header in feed.get("same", []):
         parsed = codecs.same_parse(header)
         if parsed is None:

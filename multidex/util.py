@@ -51,6 +51,27 @@ def fmt_duration(seconds):
     return "%ds" % s
 
 
+def pid_alive(pid):
+    """True when a process with this pid exists on this host.
+
+    Used for watch liveness: a state file's pid is the officer that
+    wrote it, and a dead pid means the watch is not running, however
+    its state file reads. PermissionError means the process exists
+    but is owned by someone else: alive.
+    """
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
 def write_json(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:

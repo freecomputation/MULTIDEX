@@ -177,7 +177,18 @@ class Index:
 
     # ----------------------------------------------------------- rebuild
     def rebuild(self):
-        """Regenerate the database from the JSONL logs. The log is truth."""
+        """Regenerate the database from the JSONL logs. The log is truth.
+
+        Two kinds of state have no record in the logs and are carried
+        across the rebuild rather than lost: the snippet table (the
+        snippet files stay on disk, so their accounting must too) and
+        the event links and watch metadata, which are derived state
+        held only in the database.
+        """
+        snippets = self._rows("SELECT * FROM snippets")
+        links = {r["id"]: r["links_json"] for r in self._rows(
+            "SELECT id, links_json FROM events")}
+        metas = self._rows("SELECT * FROM watch_meta")
         self.db.close()
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
@@ -195,6 +206,18 @@ class Index:
                     if line:
                         self._insert(json.loads(line))
                         count += 1
+        for row in snippets:
+            self.db.execute(
+                "INSERT OR REPLACE INTO snippets VALUES (?,?,?,?,?,?,?,?)",
+                (row["id"], row["watch_id"], row["desk"], row["kind"],
+                 row["path"], row["bytes"], row["shed"], row["t"]))
+        for event_id, links_json in links.items():
+            self.db.execute("UPDATE events SET links_json=? WHERE id=?",
+                            (links_json, event_id))
+        for row in metas:
+            self.db.execute(
+                "INSERT OR REPLACE INTO watch_meta VALUES (?,?)",
+                (row["watch_id"], row["data_json"]))
         self.db.commit()
         return count
 
@@ -219,7 +242,7 @@ class Index:
         return self.db.execute(sql, args).fetchone()["n"]
 
     def events(self, watch_id=None, desk=None, kinds=None, emitter=None,
-               t_from=None, t_to=None, limit=500):
+               t_from=None, t_to=None, limit=500, newest=False):
         sql = "SELECT * FROM events WHERE 1=1"
         args = []
         if watch_id:
@@ -241,28 +264,33 @@ class Index:
         if t_to is not None:
             sql += " AND t_start<?"
             args.append(t_to)
-        sql += " ORDER BY t_start LIMIT ?"
+        sql += " ORDER BY t_start %s LIMIT ?" % ("DESC" if newest
+                                                 else "ASC")
         args.append(limit)
         return self._event_rows(self._rows(sql, args))
 
-    def events_near_freq(self, freq_hz, tol_hz, watch_id=None, limit=200):
+    def events_near_freq(self, freq_hz, tol_hz, watch_id=None, limit=200,
+                         newest=False):
         sql = ("SELECT * FROM events WHERE freq_hz IS NOT NULL "
                "AND abs(freq_hz-?)<=?")
         args = [freq_hz, tol_hz]
         if watch_id:
             sql += " AND watch_id=?"
             args.append(watch_id)
-        sql += " ORDER BY t_start LIMIT ?"
+        sql += " ORDER BY t_start %s LIMIT ?" % ("DESC" if newest
+                                                 else "ASC")
         args.append(limit)
         return self._event_rows(self._rows(sql, args))
 
-    def events_in_band(self, lo_hz, hi_hz, watch_id=None, limit=500):
+    def events_in_band(self, lo_hz, hi_hz, watch_id=None, limit=500,
+                       newest=False):
         sql = ("SELECT * FROM events WHERE freq_hz>=? AND freq_hz<?")
         args = [lo_hz, hi_hz]
         if watch_id:
             sql += " AND watch_id=?"
             args.append(watch_id)
-        sql += " ORDER BY t_start LIMIT ?"
+        sql += " ORDER BY t_start %s LIMIT ?" % ("DESC" if newest
+                                                 else "ASC")
         args.append(limit)
         return self._event_rows(self._rows(sql, args))
 
@@ -350,25 +378,46 @@ class Index:
         return [r["scope"] for r in rows]
 
     # ----------------------------------------------------------- snippets
+    def _record_snippet_refusal(self, watch_id, desk, kind, filename,
+                                size, reason, t):
+        """A refused snippet leaves an auditable record, never silence."""
+        self.add_event(evmod.make_event(
+            watch_id, desk, "system", t, t, grade="CONFIRMED",
+            content="snippet refused: %s (%s)" % (filename, reason),
+            data={"snippet_refused": filename, "snippet_kind": kind,
+                  "bytes": size, "reason": reason}))
+
     def keep_snippet(self, watch_id, watch_dir, desk, kind, filename, data,
-                     ceiling_bytes, count_cap=None):
+                     ceiling_bytes, count_cap=None, t=None):
         """Write a snippet under quota and ceiling. Returns (path, shed).
 
         Sheds oldest current-watch snippets (satellite imagery last)
         when the ceiling demands it; every shed is reported so the
         officer can file it as an event. Returns (None, shed) when the
-        snippet itself does not fit policy.
+        snippet itself does not fit policy, and files a refusal event
+        saying why: a drop is a coverage fact, not silence. A filename
+        that already has a live row replaces it: the old row is
+        retired as shed, so one file on disk is exactly one live row
+        and the accounting cannot double-count it.
         """
+        import time as _time
+        if t is None:
+            t = _time.time()
         snip_dir = os.path.join(watch_dir, "snippets")
         os.makedirs(snip_dir, exist_ok=True)
+        rel = os.path.join("snippets", filename)
+        shed = []
         if count_cap is not None:
             row = self.db.execute(
                 "SELECT COUNT(*) AS n FROM snippets WHERE watch_id=? "
                 "AND desk=? AND kind=? AND shed=0",
                 (watch_id, desk, kind)).fetchone()
             if row["n"] >= count_cap:
-                return None, []
-        shed = []
+                self.db.commit()
+                self._record_snippet_refusal(
+                    watch_id, desk, kind, filename, len(data),
+                    "the per-desk snippet count cap is reached", t)
+                return None, shed
         total = self._snippet_bytes(watch_id)
         while total + len(data) > ceiling_bytes:
             victim = self.db.execute(
@@ -376,6 +425,10 @@ class Index:
                 "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
                 (watch_id,)).fetchone()
             if victim is None:
+                self.db.commit()
+                self._record_snippet_refusal(
+                    watch_id, desk, kind, filename, len(data),
+                    "the snippet does not fit the disk ceiling", t)
                 return None, shed
             try:
                 os.remove(os.path.join(watch_dir, victim["path"]))
@@ -385,15 +438,23 @@ class Index:
                             (victim["id"],))
             shed.append(dict(victim))
             total -= victim["bytes"]
-        rel = os.path.join("snippets", filename)
+        # Replacement retires the previous live row for this path
+        # (unless the ceiling loop already shed it as a victim), so
+        # the file about to be written is the row's only accounting.
+        existing = self.db.execute(
+            "SELECT * FROM snippets WHERE watch_id=? AND path=? "
+            "AND shed=0", (watch_id, rel)).fetchone()
+        if existing is not None:
+            self.db.execute("UPDATE snippets SET shed=1 WHERE id=?",
+                            (existing["id"],))
+            shed.append(dict(existing))
         with open(os.path.join(watch_dir, rel), "wb") as fh:
             fh.write(data)
-        import time as _time
         from . import util as _util
         self.db.execute(
             "INSERT INTO snippets VALUES (?,?,?,?,?,?,?,?)",
             (_util.new_id("sn"), watch_id, desk, kind, rel, len(data), 0,
-             _time.time()))
+             t))
         self.db.commit()
         return rel, shed
 
