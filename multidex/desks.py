@@ -71,6 +71,17 @@ ALWAYS_BENCHED = {
            "appear in the watch bill",
 }
 
+# Desks this build benches on the real source only, with the reason
+# stated: the decode needs a program outside the standard library and
+# outside the host tool set the real source binds (rtl_sdr, rtl_fm,
+# rtl_power, rtl_433, multimon-ng).
+REAL_BENCHED = {
+    "acars": "ACARS decode needs an acarsdec-class decoder program; "
+             "it is not among the host tools this build binds, so on "
+             "the real source the datalink dwell is flown by the "
+             "sweep census instead",
+}
+
 TRANSCRIPTION_REASON = ("no transcription engine is bound in this "
                         "build; voice audio is filed as snippets and "
                         "transcripts are reported as not produced")
@@ -87,6 +98,8 @@ def desk_state(name, profile, source_kind, capabilities):
     """('standing', None) or ('benched', plain-word reason)."""
     if name in ALWAYS_BENCHED:
         return "benched", ALWAYS_BENCHED[name]
+    if source_kind == "real" and name in REAL_BENCHED:
+        return "benched", REAL_BENCHED[name]
     if name in profile["desks"]["bench"]:
         return "benched", "benched by the watch profile"
     if name not in profile["desks"]["stand"]:
@@ -225,11 +238,21 @@ def process_airband(feed, ctx):
             content=("activity on the aviation guard frequency"
                      if is_guard else None), data=data)
         if seg["snr_db"] >= 18 or is_guard:
-            ev["data"]["_snippet"] = _snippet(
-                _wav_bytes((ctx["watch_id"], seg["freq_hz"],
-                            seg["offset_s"])),
-                "airband-%d-%d.wav" % (int(seg["freq_hz"]),
-                                       int(seg["offset_s"])), "voice")
+            if seg.get("audio_b64"):
+                # Real source: the snippet is the captured audio
+                # itself, carried in the feed by the Tuner Server.
+                ev["data"]["_snippet"] = {
+                    "filename": "airband-%d-%d.wav"
+                                % (int(seg["freq_hz"]),
+                                   int(seg["offset_s"])),
+                    "kind": "voice", "b64": seg["audio_b64"]}
+            else:
+                ev["data"]["_snippet"] = _snippet(
+                    _wav_bytes((ctx["watch_id"], seg["freq_hz"],
+                                seg["offset_s"])),
+                    "airband-%d-%d.wav" % (int(seg["freq_hz"]),
+                                           int(seg["offset_s"])),
+                    "voice")
         out.append(ev)
     return out
 
@@ -355,6 +378,18 @@ def process_pager(feed, ctx):
             grade="CONFIRMED", content=message,
             data={"emitter_kind": "pager", "address": address,
                   "function": function, "broadcast": True}))
+    # Real source: messages already decoded from the audio by an
+    # external decoder program (multimon-ng) and carried at the same
+    # normalized layer the batch path produces.
+    for msg in feed.get("messages", []):
+        out.append(make_event(
+            ctx["watch_id"], "pager", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=929.6125e6, emitter="PAGER:%d" % msg["address"],
+            grade="CONFIRMED", content=msg["message"],
+            data={"emitter_kind": "pager", "address": msg["address"],
+                  "function": msg.get("function", 0),
+                  "broadcast": True,
+                  "decoder": msg.get("decoder", "multimon-ng")}))
     return out
 
 
@@ -369,15 +404,35 @@ def process_satellite(feed, ctx):
                      ("aos", "los", "t_max", "max_elev_deg",
                       "aos_az_deg", "los_az_deg")}}
     if feed.get("lock"):
+        data = dict(base, quality=feed.get("quality"))
+        if feed.get("audio_b64"):
+            # Real source: the evidence is the captured pass audio.
+            # APT imagery decode needs a decoder program this build
+            # does not bind, and the desk says so rather than filing
+            # an image it did not receive.
+            data["audio"] = feed.get("audio_name")
+            data["imagery"] = None
+            ev = make_event(
+                ctx["watch_id"], "satellite", "pass", ctx["t0"],
+                ctx["t1"], freq_hz=ctx.get("freq_hz"),
+                emitter=feed.get("sat"), grade="CONFIRMED",
+                content="pass captured, signal quality %.2f; pass "
+                        "audio filed as evidence - APT imagery is "
+                        "not decoded by this build"
+                        % feed.get("quality", 0),
+                data=data)
+            ev["data"]["_snippet"] = {
+                "filename": feed.get("audio_name", "pass.wav"),
+                "kind": "satellite", "b64": feed["audio_b64"]}
+            return [ev]
         ev = make_event(
             ctx["watch_id"], "satellite", "pass", ctx["t0"], ctx["t1"],
             freq_hz=ctx.get("freq_hz"), emitter=feed.get("sat"),
             grade="CONFIRMED",
             content="pass captured, decode quality %.2f"
                     % feed.get("quality", 0),
-            data=dict(base, quality=feed.get("quality"),
-                      imagery="sat-%s-%d.ppm" % (feed.get("norad"),
-                                                 int(ctx["t0"]))))
+            data=dict(data, imagery="sat-%s-%d.ppm" % (feed.get("norad"),
+                                                       int(ctx["t0"]))))
         ev["data"]["_snippet"] = _snippet(
             _ppm_bytes((feed.get("sat"), int(ctx["t0"]))),
             ev["data"]["imagery"], "satellite")
@@ -412,6 +467,20 @@ def process_sonde(feed, ctx):
                 data={"emitter_kind": "sonde", "flash": True,
                       "site": frames[0]["site"],
                       "max_alt_m": max(f["alt_m"] for f in frames)}))
+    # Real source: the window is censused and carriers in the sonde
+    # band are reported as presence. Telemetry decode needs an
+    # RS41-class decoder program this build does not bind, and the
+    # event says so rather than inventing a track.
+    for carrier in feed.get("carriers", []):
+        out.append(make_event(
+            ctx["watch_id"], "sonde", "census", ctx["t0"], ctx["t1"],
+            freq_hz=carrier["freq_hz"], emitter=None, grade="PROBABLE",
+            content="carrier present in the radiosonde band during "
+                    "the sonde window; telemetry is not decoded - "
+                    "an RS41-class decoder is not bound in this build",
+            data={"emitter_kind": "sonde", "telemetry": False,
+                  "peak_dbm": carrier.get("peak_dbm"),
+                  "noise_floor_db": carrier.get("noise_floor_db")}))
     return out
 
 
@@ -421,7 +490,7 @@ def process_cellular(feed, ctx):
     return [make_event(
         ctx["watch_id"], "cellular", "census", ctx["t0"], ctx["t1"],
         freq_hz=cell["freq_hz"], emitter=cell["cell_id"],
-        grade="CONFIRMED",
+        grade=cell.get("grade", "CONFIRMED"),
         content="cell present, %s, RSRP %.1f dBm (metadata only)"
                 % (cell["band"], cell["rsrp_dbm"]),
         data={"emitter_kind": "cell", "band": cell["band"],
@@ -430,18 +499,37 @@ def process_cellular(feed, ctx):
 
 
 def process_trunking(feed, ctx):
-    return [make_event(
-        ctx["watch_id"], "trunking", "census", ctx["t0"], ctx["t1"],
-        freq_hz=s["freq_hz"], emitter="SYS:" + s["sysid"],
-        grade="CONFIRMED",
-        content="trunked system %s, %d sites, %d talkgroups active "
-                "(metadata only)" % (s["sysid"], s["sites"],
-                                     s["talkgroups_active"]),
-        data={"emitter_kind": "system", "sysid": s["sysid"],
-              "sites": s["sites"],
-              "talkgroups_active": s["talkgroups_active"],
-              "metadata_only": True})
-        for s in feed.get("systems", [])]
+    out = []
+    for s in feed.get("systems", []):
+        if s.get("activity_only"):
+            # Real source: a persistent carrier in the trunking band,
+            # censused as presence. System identity, sites and
+            # talkgroup counts need a trunking decoder this build
+            # does not bind, and the event says so.
+            out.append(make_event(
+                ctx["watch_id"], "trunking", "census", ctx["t0"],
+                ctx["t1"], freq_hz=s["freq_hz"],
+                emitter="SYS:" + s["sysid"], grade="PROBABLE",
+                content="persistent carrier in the trunking band, "
+                        "consistent with a control channel (metadata "
+                        "only); system identity and talkgroup counts "
+                        "are not decoded by this build",
+                data={"emitter_kind": "system", "sysid": s["sysid"],
+                      "metadata_only": True,
+                      "peak_dbm": s.get("peak_dbm")}))
+            continue
+        out.append(make_event(
+            ctx["watch_id"], "trunking", "census", ctx["t0"], ctx["t1"],
+            freq_hz=s["freq_hz"], emitter="SYS:" + s["sysid"],
+            grade="CONFIRMED",
+            content="trunked system %s, %d sites, %d talkgroups active "
+                    "(metadata only)" % (s["sysid"], s["sites"],
+                                         s["talkgroups_active"]),
+            data={"emitter_kind": "system", "sysid": s["sysid"],
+                  "sites": s["sites"],
+                  "talkgroups_active": s["talkgroups_active"],
+                  "metadata_only": True}))
+    return out
 
 
 def process_broadcast(feed, ctx):

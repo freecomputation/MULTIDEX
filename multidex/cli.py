@@ -91,11 +91,8 @@ def cmd_sitrep(args):
     home = _home(args)
     index = Index(home)
     try:
-        watch_id = util.read_json(os.path.join(home, "current_watch"),
-                                  default=None)
-        if not watch_id:
-            watches = sorted(os.listdir(os.path.join(home, "watches")))
-            watch_id = watches[-1] if watches else None
+        watch_id = products.resolve_current_watch(home,
+                                                  allow_complete=True)
         if not watch_id:
             print("No watch exists yet; there is nothing to report.")
             return 1
@@ -118,8 +115,10 @@ def cmd_sitrep(args):
 
 def cmd_stop(args):
     home = _home(args)
-    watch_id = util.read_json(os.path.join(home, "current_watch"),
-                              default=None)
+    # The stop must land in the folder of the watch actually
+    # running: the pointer is validated against the disk, and a
+    # stale pointer resolves to the newest incomplete watch.
+    watch_id = products.resolve_current_watch(home)
     if not watch_id:
         print("No watch is running.")
         return 1

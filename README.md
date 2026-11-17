@@ -56,9 +56,19 @@ Five organs, one tuner.
   sources sit behind it. The simulated source generates a
   deterministic synthetic spectrum and traffic load, so the whole
   system runs with no hardware attached. The real source shells to
-  `rtl_sdr` and `rtl_fm` when they are installed; in this build it
-  honestly carries only the sweep and airband desks, and every other
-  desk benches at muster with that reason stated.
+  `rtl_sdr` and `rtl_fm` for captures and feeds the standing desks
+  from them: Mode S is demodulated from the 1090 MHz capture in
+  process, AIS is demodulated from discriminator audio in process,
+  pager and APRS audio is decoded by `multimon-ng`, ISM devices are
+  decoded by `rtl_433`, airband and weather radio run on real audio
+  (weather radio SAME headers via `multimon-ng`), and the sonde,
+  broadcast, cellular, and trunking desks are fed from the scan
+  census. ACARS benches on the real source: it needs an
+  acarsdec-class decoder, which is not among the bound host tools.
+  A capture that reaches its time limit keeps and processes the
+  bytes it did get; a gap is filed only when a desk's capture
+  returns zero usable bytes or its tool is absent, and the loss is
+  recorded per desk, never as a lost dwell.
 - The Channelizer plans logical VFOs inside each dwell window, so
   several desks are served by one tuning. Channels outside the window
   are dropped and the drops are reported in the dwell record.
@@ -85,19 +95,27 @@ are provisional until three watches have contributed.
 
 ## Desk roster
 
-Tier 1 desks are functional against the simulated source, decoding
-genuine frames the simulator emits at the demodulated layer: ADS-B
-with real Mode S decoding (CRC, callsign, CPR position pairs,
-velocity), airband voice activity, ACARS, AIS (types 1 and 5 with
-checksum), weather radio with SAME alert decoding, ISM device bursts,
-APRS, and POCSAG paging with real BCH error checking.
+Tier 1 desks are functional against both sources, decoding genuine
+frames: against the simulator, frames the simulator emits at the
+demodulated layer; against the real source, frames demodulated or
+decoded from real captures as described above. ADS-B with real
+Mode S decoding (CRC, callsign, CPR position pairs, velocity),
+airband voice activity, ACARS (simulated source; benched on the
+real source, above), AIS (types 1 and 5 with checksum), weather
+radio with SAME alert decoding, ISM device bursts, APRS, and
+POCSAG paging with real BCH error checking.
 
 Tier 2 is implemented where pure Python honestly carries it and
 benched with the reason where it does not. Satellite pass prediction
 runs from TLE with a simplified two-body propagator and is graded
-PROBABLE wherever it appears; captured passes file synthetic APT
-imagery as evidence. Radiosonde windows are scheduled from configured
-sites and synoptic hours. Benched with reasons stated in `doctor`:
+PROBABLE wherever it appears; against the simulator, captured passes
+file synthetic APT imagery as evidence, and against the real source
+they file the captured pass audio, with APT imagery stated as not
+decoded by this build. Radiosonde windows are scheduled from
+configured sites and synoptic hours; against the real source the
+sonde desk files a presence census of carriers in the sonde band
+and states that telemetry is not decoded, because an RS41-class
+decoder is not bound. Benched with reasons stated in `doctor`:
 VDL2, HFDL, amateur SSB/CW/digital, DMR/P25/NXDN digital voice, and
 ISS voice/SSTV decode - each needs a decoder program outside the
 standard library. Transcription is likewise benched: no engine is
@@ -115,28 +133,53 @@ UNRESOLVED.
 One profile file carries every knob: source kind and seed, home
 position and antenna description, watch length, SITREP period, the
 deep-sweep window, the disk ceiling, rotation weights and dwells, the
-desk roster, FLASH triggers, snippet caps, transcription bounds,
-radiosonde sites, and an advanced section (gain policy, ephemeris
-file, interrupt cap, rehearsal outages, and the time-scale test
-knob). The shipped `profiles/default.toml` is commented throughout.
-A profile that fails validation is refused in plain words before the
-watch stands.
+desk roster, FLASH triggers, the FLASH chime switch, snippet caps,
+transcription bounds, radiosonde sites, and an advanced section
+(gain policy, ephemeris file, interrupt cap, rehearsal outages, and
+the time-scale test knob). The shipped `profiles/default.toml` is
+commented throughout. A profile that fails validation is refused in
+plain words before the watch stands.
 
-Muster gates, checked before any watch: tuner present (or the
-simulated source selected), clock within one second where an offset
-can be measured (the unverifiable case is stated, not hidden), disk
-free space at least the profile ceiling, profile valid, home
-position set. Satellite elements older than seven days degrade the
-watch with a warning; older than thirty, the satellite desk benches.
+The shipped default profile selects the real source. If the real
+source cannot be stood at muster (the receiver tools are missing or
+no dongle answers), the watch falls back to the simulated source
+and states the substitution plainly in the muster output, in the
+status verb output, and in every product's coverage account; it is
+never silent. A profile that selects the simulated source
+explicitly behaves exactly as it did before. The default profile's
+home position is a reference position and must be set to the
+watch's own position before a real watch.
+
+The `[alerts]` section carries the FLASH chime switch, on by
+default. When a FLASH is written and the chime is on, a two-tone
+chime sounds through the first available of `pw-play`, `paplay`,
+and `aplay` (the WAV is generated with the standard library at
+first use); when no player is available the FLASH's event data
+records that, and the chime never blocks or fails the FLASH.
+
+Muster gates, checked before any watch: tuner present (with the
+fallback above where the real source is selected), clock within one
+second where an offset can be measured (the unverifiable case is
+stated, not hidden), disk free space at least the profile ceiling,
+profile valid, home position set. Satellite elements older than
+seven days degrade the watch with a warning; older than thirty,
+the satellite desk benches.
 
 ## Failure behavior
 
 A crashed desk is restarted once, then benched, with the benching
 filed. Tuner loss during a dwell becomes a gap event and is counted
-in the coverage account; the watch continues on schedule. An
-interrupted watch resumes from its bill, state file, and event log.
-Nothing fails silently: every loss lands in the Index and in the
-Watch Report's coverage account and desk health chapter.
+in the coverage account; the watch continues on schedule. On the
+real source a single desk's failed capture is filed as that desk's
+gap and the dwell's other desks still report; a capture stopped at
+its time limit is processed, not lost. An interrupted watch resumes
+from its bill, state file, and event log. The `current_watch`
+pointer is validated against the disk by the status and stop verbs:
+a pointer naming a vanished or completed watch resolves to the
+newest watch still running, so a stop always lands in the folder
+of the watch actually running. Nothing fails silently: every loss
+lands in the Index and in the Watch Report's coverage account and
+desk health chapter.
 
 ## Testing
 
@@ -146,7 +189,15 @@ orbit prediction, scheduler classes and placement rules, Index
 dossier correlation and snippet shedding, anomaly rules, product
 rendering (including the coverage account and a no-em-dash check),
 muster gates, supervisor crash-restart-bench behavior, and an
-end-to-end accelerated watch.
+end-to-end accelerated watch. The real source is covered by unit
+tests for its Mode S and AIS demodulators, by feed tests running
+against shim receiver tools, and by a shimmed-real integration
+test: fake `rtl_sdr`, `rtl_fm`, `rtl_power`, `rtl_433`, and
+`multimon-ng` executables emit fixture bytes (genuine Mode S frames
+with known ICAO addresses, a genuine AIS frame, an AM audio burst),
+and a short real-source watch runs through the real CLI against
+them, mustering on the real source with the previously benched
+desks standing.
 
 The watch engine accepts a time-scale factor (the profile's
 `time_scale` knob, or the `MULTIDEX_TIME_SCALE` environment

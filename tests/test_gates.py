@@ -64,7 +64,14 @@ def test_real_source_benches_itself_without_tools():
     ok, reason = source.available()
     if shutil.which("rtl_sdr") is None:
         assert not ok and "rtl_sdr" in reason
-        assert source.capabilities() == {"sweep", "airband"}
+        # 0.1.1: the real source feeds every desk the host tool set
+        # carries; only the ALWAYS/REAL benched desks stay down.
+        caps = source.capabilities()
+        for desk in ("adsb", "ais", "pager", "ism", "airband",
+                     "wxradio", "aprs", "sonde", "broadcast",
+                     "cellular", "trunking", "satellite", "sweep"):
+            assert desk in caps, desk
+        assert "acars" not in caps
 
 
 def test_doctor_text_lists_tiers(profile, home):

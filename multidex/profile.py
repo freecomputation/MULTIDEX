@@ -11,7 +11,7 @@ import tomllib
 
 DEFAULTS = {
     "name": "default",
-    "source": {"kind": "simulated", "seed": 20261117},
+    "source": {"kind": "real", "seed": 20261117},
     "home": {
         "lat": 39.0, "lon": -98.0, "alt_m": 300,
         "region": "the central United States",
@@ -49,6 +49,7 @@ DEFAULTS = {
         "watch_freqs_hz": [121500000],
         "guard_hz": 121500000,
     },
+    "alerts": {"chime": True},
     "snippets": {
         "iq_max_per_watch": 100,
         "voice_cap_per_desk": 200,
@@ -119,6 +120,9 @@ def validate(profile):
     grade = profile.get("flash", {}).get("threshold_grade")
     if grade not in ("CONFIRMED", "PROBABLE", "UNRESOLVED"):
         problems.append("flash threshold grade is not a confidence grade")
+    chime = profile.get("alerts", {}).get("chime")
+    if chime is not None and not isinstance(chime, bool):
+        problems.append("alerts chime must be true or false")
     return problems
 
 
