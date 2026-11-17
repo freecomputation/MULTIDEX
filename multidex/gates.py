@@ -109,20 +109,37 @@ def gates_passed(gates):
 
 def doctor_text(profile, home):
     from .sim import SimSource
+    fallback = None
     if profile["source"]["kind"] == "real":
         source = RealSource(profile)
-        capabilities = source.capabilities()
+        ok, detail = source.available()
+        if ok:
+            capabilities = source.capabilities()
+        else:
+            # The watch this profile stands would fall back to the
+            # simulated source and state the substitution everywhere.
+            # Doctor shows that footing, with the fallback stated in
+            # the open, never as a bare tuner failure.
+            fallback = detail
+            source = SimSource(profile, time.time())
+            capabilities = None
     else:
         source = SimSource(profile, time.time())
         capabilities = None
     lines = ["MULTIDEX doctor", "Checks:"]
     for name, ok, detail in run_gates(profile, home, source):
+        if fallback and name == "tuner":
+            detail = ("real source unavailable (%s); a watch on this "
+                      "profile falls back to the simulated source, "
+                      "and the substitution is stated in its muster "
+                      "output, its status and every product's "
+                      "coverage account" % fallback)
         lines.append("- %s: %s - %s" % (name, "PASS" if ok else "FAIL",
                                         detail))
     lines.append("Desk inventory (tier, state, reason):")
     for name in sorted(SPECS):
         tier, service, _cpu, _ch = SPECS[name]
-        state, reason = desk_state(name, profile, profile["source"]["kind"],
+        state, reason = desk_state(name, profile, source.kind,
                                    capabilities)
         line = "- %s (tier %d, %s): %s" % (name, tier, service, state)
         if reason:

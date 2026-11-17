@@ -77,6 +77,8 @@ def coverage_stats(index, watch_id, t_from=None, t_to=None):
 
 
 def _source_line(meta):
+    if meta.get("source_note"):
+        return "Source note: %s" % meta["source_note"]
     if meta.get("source") == "simulated":
         return ("Source: simulated spectrum (deterministic synthetic "
                 "traffic, no hardware). Every event in this watch is "
@@ -133,6 +135,13 @@ def maybe_flash(index, watch_id, ev, profile):
     ]
     util.write_text(os.path.join(index.watch_dir(watch_id), name),
                     "\n".join(lines))
+    # The FLASH chime (profile [alerts]): sounded after the file is
+    # written, never instead of it, and its outcome is recorded in
+    # the triggering event's data. The caller persists the event
+    # after this returns, so the record lands with the event.
+    if profile.get("alerts", {}).get("chime", True):
+        from .chime import play_chime
+        ev["data"]["chime"] = play_chime(index.watch_dir(watch_id))
     return name
 
 
@@ -460,12 +469,59 @@ def ask(index, query):
 
 # ----------------------------------------------------------------- status
 
+def resolve_current_watch(home, allow_complete=False):
+    """The watch the pointer means, validated against the disk.
+
+    The current_watch pointer is a claim, not a fact: the folder it
+    names may be gone, or the watch may have completed without the
+    pointer being cleared. Trust the pointer only when its folder
+    exists and (unless allow_complete) its state is not complete;
+    otherwise resolve to the newest watch folder whose state is not
+    complete. Returns a watch id or None.
+    """
+    watches_dir = os.path.join(home, "watches")
+    pointer = util.read_json(os.path.join(home, "current_watch"),
+                             default=None)
+
+    def state_of(watch_id):
+        path = os.path.join(watches_dir, watch_id, "state.json")
+        if not os.path.isdir(os.path.join(watches_dir, watch_id)):
+            return None
+        return util.read_json(path, default={}) or {}
+
+    if pointer:
+        state = state_of(pointer)
+        if state is not None and (allow_complete
+                                  or not state.get("complete")):
+            return pointer
+    try:
+        folders = sorted(os.listdir(watches_dir), reverse=True)
+    except OSError:
+        return None
+    for folder in folders:
+        state = state_of(folder)
+        if state is not None and (allow_complete
+                                  or not state.get("complete")):
+            return folder
+    return None
+
+
 def status_text(home):
-    pointer = os.path.join(home, "current_watch")
-    watch_id = util.read_json(pointer, default=None)
-    if not watch_id:
-        return "No watch is running."
     from .index import Index
+    pointer = util.read_json(os.path.join(home, "current_watch"),
+                             default=None)
+    watch_id = resolve_current_watch(home)
+    if not watch_id:
+        # No running watch. If the pointer names a completed watch,
+        # say which one finished; a stale pointer to a vanished
+        # folder is reported as no watch, never as a phantom id.
+        if pointer:
+            state = util.read_json(os.path.join(
+                home, "watches", pointer, "state.json"), default=None)
+            if state and state.get("complete"):
+                return ("No watch is running. Last watch %s completed."
+                        % pointer)
+        return "No watch is running."
     index = Index(home)
     try:
         state = util.read_json(os.path.join(
@@ -473,12 +529,10 @@ def status_text(home):
         meta = _meta(index, watch_id)
     finally:
         index.close()
-    if state.get("complete"):
-        return "No watch is running. Last watch %s completed." % watch_id
     elapsed = state.get("elapsed_s", 0)
     total = (meta.get("planned_end", 0) - meta.get("start", 0)) or 1
     health = state.get("benched") or []
-    return "\n".join([
+    lines = [
         "Watch %s: %s elapsed, %s remaining"
         % (watch_id, util.fmt_duration(elapsed),
            util.fmt_duration(max(0, total - elapsed))),
@@ -489,4 +543,7 @@ def status_text(home):
         "Desks: %s" % (("benched: " + ", ".join(sorted(health)))
                        if health else "all standing desks healthy"),
         "Source: %s" % meta.get("source", "unknown"),
-    ])
+    ]
+    if meta.get("source_note"):
+        lines.append("Source note: %s" % meta["source_note"])
+    return "\n".join(lines)

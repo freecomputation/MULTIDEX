@@ -216,12 +216,41 @@ class WatchRunner:
         self.supervisor = Supervisor()
         self.exploit = None
         self.extra_bench = {}
+        self.source_note = None
         self.interrupts_used = {}
         self.flash_count = 0
 
     # ------------------------------------------------------------ helpers
-    def _source(self, watch_start):
+    def _resolve_source(self, watch_start):
+        """Pick the source for a new watch; returns (source, note).
+
+        A profile that asks for the real source on a machine that
+        cannot stand it - tools missing or the dongle unreachable -
+        falls back to the simulated source, and the substitution is
+        returned as a note the muster, the status verb and every
+        product must state. It is never made silently. An explicitly
+        simulated profile is used exactly as configured.
+        """
         if self.profile["source"]["kind"] == "real":
+            source = RealSource(self.profile)
+            ok, detail = source.available()
+            if ok:
+                return source, None
+            from .sim import SimSource
+            note = ("the profile asked for the real source, but it "
+                    "could not be stood: %s. This watch therefore "
+                    "runs on the simulated source, and every event "
+                    "in it is synthetic. This substitution is stated "
+                    "in the muster output, in the status verb, and "
+                    "in every product's coverage account." % detail)
+            return SimSource(self.profile, watch_start), note
+        from .sim import SimSource
+        return SimSource(self.profile, watch_start), None
+
+    def _source_for_meta(self, meta, watch_start):
+        """The source a resumed watch flies: the one it mustered on,
+        recorded in its metadata, fallback included."""
+        if meta.get("source") == "real":
             return RealSource(self.profile)
         from .sim import SimSource
         return SimSource(self.profile, watch_start)
@@ -242,11 +271,14 @@ class WatchRunner:
         return os.path.exists(os.path.join(self.watch_dir, "stop.flag"))
 
     def _file(self, ev):
-        self.index.add_event(ev)
+        # FLASH first: the chime outcome is recorded in the event's
+        # own data, so the event must not be persisted before
+        # maybe_flash has had its say.
         name = products.maybe_flash(self.index, self.watch_id, ev,
                                     self.profile)
         if name:
             self.flash_count += 1
+        self.index.add_event(ev)
         return ev
 
     def _pace(self, seconds):
@@ -265,9 +297,14 @@ class WatchRunner:
         if resume_id:
             return self._resume(resume_id)
         start = start_epoch or time.time()
-        source = self._source(start)
+        source, source_note = self._resolve_source(start)
+        self.source_note = source_note
         gate_list = gates.run_gates(profile, self.home, source,
                                     at_epoch=start)
+        if source_note:
+            gate_list = [
+                (n, ok, source_note if n == "tuner" else d)
+                for n, ok, d in gate_list]
         if not gates.gates_passed(gate_list):
             failed = ["%s: %s" % (n, d) for n, ok, d in gate_list if not ok]
             return {"ok": False,
@@ -302,6 +339,7 @@ class WatchRunner:
             "ephemeris_age_days": (None if age is None
                                    else round(max(age, 0.0), 1)),
             "ended_early": False, "end_reason": None, "resumed": False,
+            "source_note": source_note,
         }
         self.meta = meta
         self.index.set_watch_meta(watch_id, meta)
@@ -309,11 +347,15 @@ class WatchRunner:
         util.write_json(os.path.join(self.home, "current_watch"), watch_id)
         self.tuner = TunerServer(source, profile)
         self.tuner.begin_watch(start)
+        muster_data = {"gates": [(n, ok, d) for n, ok, d in gate_list]}
+        if source_note:
+            muster_data["source_note"] = source_note
+            print("Source note: %s" % source_note)
         self._file(make_event(
             watch_id, "officer", "system", start, start,
             content="muster passed; watch stood with %d bill items"
                     % len(bill), grade="CONFIRMED",
-            data={"gates": [(n, ok, d) for n, ok, d in gate_list]}))
+            data=muster_data))
         for name in sorted(SPECS):
             reason = self._desk_benched_reason(name, source)
             if reason:
@@ -339,7 +381,8 @@ class WatchRunner:
                               default=[])
         state = util.read_json(os.path.join(self.watch_dir, "state.json"),
                                default={}) or {}
-        source = self._source(meta["start"])
+        source = self._source_for_meta(meta, meta["start"])
+        self.source_note = meta.get("source_note")
         self.tuner = TunerServer(source, self.profile)
         self.tuner.begin_watch(meta["start"])
         meta["resumed"] = True
@@ -432,6 +475,15 @@ class WatchRunner:
                 data={"bill_id": item["id"], "cause": "tuner loss"}))
             feeds = None
         if feeds is not None:
+            for desk_name, problem in \
+                    self.tuner.capture_errors().items():
+                self._file(make_event(
+                    self.watch_id, "officer", "gap", t0, t1,
+                    freq_hz=item["center_hz"], grade="CONFIRMED",
+                    content="capture failed for %s during %s: %s"
+                            % (desk_name, item["label"], problem),
+                    data={"bill_id": item["id"], "desk": desk_name,
+                          "cause": "capture failure"}))
             by_desk = {}
             for vfo in vfos:
                 by_desk.setdefault(vfo["desk"], vfo)
@@ -463,9 +515,18 @@ class WatchRunner:
                               "reason": info["reason"]}))
                 for ev in events:
                     self._adopt_snippet(ev, name)
-                    self.index.add_event(ev)
                     new_events.append(ev)
                 heard[name] = len(events)
+            # FLASH before persistence, so the chime outcome is
+            # recorded in each event's own data; then the whole batch
+            # lands in the Index before exploitation correlates it.
+            for ev in new_events:
+                name = products.maybe_flash(self.index, self.watch_id,
+                                            ev, self.profile)
+                if name:
+                    self.flash_count += 1
+            for ev in new_events:
+                self.index.add_event(ev)
         self.index.add_event(make_event(
             self.watch_id, "officer", "dwell", t0, t1,
             freq_hz=item["center_hz"], grade="CONFIRMED",
@@ -478,11 +539,6 @@ class WatchRunner:
                   "dropped": dropped}))
         for ev in self.exploit.process(self.watch_id, new_events):
             self._file(ev)
-        for ev in new_events:
-            name = products.maybe_flash(self.index, self.watch_id, ev,
-                                        self.profile)
-            if name:
-                self.flash_count += 1
         self._maybe_interrupt(item, new_events, watch_start)
 
     def _adopt_snippet(self, ev, desk):

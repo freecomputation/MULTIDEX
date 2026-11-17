@@ -8,16 +8,25 @@
 name = "default"
 
 [source]
-# Where the spectrum comes from: "simulated" (deterministic synthetic
-# spectrum, no hardware) or "real" (an RTL-SDR through rtl_sdr/rtl_fm).
-kind = "simulated"
+# Where the spectrum comes from: "real" (an RTL-SDR through rtl_sdr
+# and rtl_fm) or "simulated" (deterministic synthetic spectrum, no
+# hardware). The shipped default is "real": on a machine with the
+# dongle and tools, a first watch is a real watch. If the real source
+# cannot be stood at muster - tools missing or the dongle unreachable -
+# the watch falls back to the simulated source and states the
+# substitution plainly in the muster output, in the status verb, and
+# in every product's coverage account. It never substitutes silently.
+kind = "real"
 # Seed for the simulated world. Same seed, same spectrum.
 seed = 20261117
 
 [home]
 # Home position. Local only; products describe it at region level only.
 # The shipped values are a reference position in the central United
-# States - set your own before a real watch.
+# States. They are reference coordinates only: you must set your own
+# position here before a real watch. Satellite passes, radiosonde
+# windows and position reporting are all computed from this point, so
+# a real watch flown on the reference position reports the wrong sky.
 lat = 39.0
 lon = -98.0
 alt_m = 300
@@ -65,6 +74,13 @@ stand = ["adsb", "airband", "acars", "ais", "wxradio", "ism", "aprs",
          "trunking", "broadcast"]
 # Desks to bench even though they could stand.
 bench = []
+
+[alerts]
+# A two-tone chime sounds on the host when a FLASH is written, so an
+# alert is audible in the room as well as filed. The chime never
+# blocks a FLASH: with no audio player on the host, the FLASH records
+# that it was not played.
+chime = true
 
 [flash]
 # Lowest confidence grade that can raise a FLASH on an assessment.
