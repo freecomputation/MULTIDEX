@@ -6,7 +6,11 @@ rtl_sdr, an AIS sentence framed in HDLC/NRZI and modulated into
 discriminator audio for a shim rtl_fm, and plain audio bursts. The
 modulators follow the same published formats the demodulators in
 multidex.tuner implement - they are inverses by specification, not
-by shared code.
+by shared code. The AIS frame builder below implements bit stuffing
+and the CRC-16/X.25 FCS from the specification in this file, and the
+Mode S modulator places its data block at the specification offset,
+so a demodulator that shares a wrong convention with a fixture has
+nothing to hide behind.
 """
 
 import math
@@ -15,10 +19,17 @@ import random
 import struct
 
 from multidex import codecs
-from multidex.tuner import _bytes_of, _crc_x25
 
 
 # ------------------------------------------------------------- Mode S I/Q
+
+# Mode S at 2 Msps, per the standard: preamble pulses at 0, 1.0, 3.5
+# and 4.5 us (samples 0, 2, 7, 9); the 112-bit PPM data block starts
+# 8 us after the preamble start (sample 16); each bit cell is 1 us
+# (2 samples), pulse in the first half for a 1, second half for a 0.
+_MODES_PREAMBLE_SAMPLES = (0, 2, 7, 9)
+_MODES_DATA_START_SAMPLE = 16
+
 
 def modes_iq(frames, rate=2000000, seconds=0.25, seed=7):
     """PPM-modulate Mode S frame hex strings into unsigned I/Q bytes."""
@@ -32,19 +43,54 @@ def modes_iq(frames, rate=2000000, seconds=0.25, seed=7):
     for frame in frames:
         value = int(frame, 16)
         bits = [(value >> (111 - j)) & 1 for j in range(112)]
-        pulses = [0, 2, 7, 9]
+        pulses = list(_MODES_PREAMBLE_SAMPLES)
         for j, bit in enumerate(bits):
-            pulses.append(10 + 2 * j + (0 if bit else 1))
+            pulses.append(_MODES_DATA_START_SAMPLE + 2 * j
+                          + (0 if bit else 1))
         for p in pulses:
             at = (pos + p) * 2
             if at + 1 < len(iq):
                 iq[at] = 232
                 iq[at + 1] = 128
-        pos += 234 + 400
+        pos += 240 + 400
     return bytes(iq)
 
 
 # ------------------------------------------------------------------- AIS
+# The AIS frame builder, from the specification (ITU-R M.1371 /
+# IEC 61162): the payload bit stream is packed into HDLC data octets
+# in transmission order, first bit transmitted being the least
+# significant bit of its octet; the frame check sequence is
+# CRC-16/X.25 (reflected polynomial 0x8408, initial value 0xFFFF,
+# transmitted complemented, low octet first) over those octets; a 0
+# is stuffed after any five consecutive 1s so the flag 0x7E occurs
+# only at frame boundaries. Implemented here, in the fixture, so the
+# production demodulator is checked against the specification and
+# not against its own helper functions.
+
+def _spec_bytes_of(bits):
+    """Group a transmission-order bit stream into octets, first bit
+    received being the least significant bit of its octet."""
+    out = bytearray()
+    for i in range(0, len(bits) - 7, 8):
+        byte = 0
+        for j in range(8):
+            byte |= bits[i + j] << j
+        out.append(byte)
+    return bytes(out)
+
+
+def _spec_fcs(data):
+    """CRC-16/X.25 frame check sequence over data octets, returned
+    as the two octets in transmission order (low octet first)."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x8408 if crc & 1 else 0)
+    crc ^= 0xFFFF
+    return bytes((crc & 0xFF, crc >> 8))
+
 
 def ais_frame_bits(sentence):
     """The on-air bit stream (flags included) for an AIVDM sentence."""
@@ -57,9 +103,8 @@ def ais_frame_bits(sentence):
     bits = [int(c) for c in bitstr]
     while len(bits) % 8:
         bits.append(0)
-    data = _bytes_of(bits)
-    fcs = _crc_x25(data) ^ 0xFFFF
-    frame = data + bytes((fcs & 0xFF, fcs >> 8))
+    data = _spec_bytes_of(bits)
+    frame = data + _spec_fcs(data)
     stream = []
     for byte in frame:
         for j in range(8):

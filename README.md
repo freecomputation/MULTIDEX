@@ -11,6 +11,8 @@ MULTIDEX receives only. It never transmits, never injects, and never
 touches a network. It is built entirely on the Python 3 standard
 library (Python 3.11 or later) and runs on modest hardware.
 
+Version 0.1.2.
+
 ## The verbs
 
 The whole command surface is seven verbs. No verb prompts for input;
@@ -24,11 +26,16 @@ anything it cannot get is a refusal with the reason in plain words.
   the tuner.
 - `multidex status` - five lines: current dwell, elapsed and
   remaining time, events and dossiers so far, FLASH count, desk
-  health.
+  health. A watch counts as running only while the officer process
+  its state file records is still alive; a watch whose officer is
+  gone is reported as not running and named as interrupted, and a
+  watch folder with no state file is never reported as running.
 - `multidex sitrep` - render a SITREP for the running (or latest)
   watch now.
 - `multidex stop` - stand the watch down at the next dwell boundary;
-  the Watch Report covers the elapsed portion and says so.
+  the Watch Report covers the elapsed portion and says so. When no
+  officer process is alive, stop says no watch is running and
+  writes nothing.
 - `multidex ask <query>` - query the Index: an emitter identity, a
   frequency such as `121.5 MHz`, a band such as `band uhf`, or a
   service such as `adsb`.
@@ -51,7 +58,18 @@ Five organs, one tuner.
   is a weighted standing rotation, re-weighted for day and night
   propagation. Class C census sweeps fill the gaps and own the
   deep-sweep hours. A strong unknown emission can interrupt B and C
-  work, capped per hour.
+  work, capped per hour. A home stands one watch at a time: a start
+  that finds another watch's officer alive in the same home is
+  refused by name, and the officer holds an exclusive lock on the
+  home for its lifetime. The officer publishes its state at muster
+  and at every dwell start and end, each save carrying its process
+  id and a heartbeat, so elapsed time tracks the watch rather than
+  jumping a dwell at a time. On the real source, dwell records and
+  desk events carry the actual execution times from the watch clock
+  (with the planned times recorded alongside), and pacing sleeps
+  only the remainder of each item's planned duration, so the watch
+  tracks wall time instead of overrunning by the sum of its capture
+  times.
 - The Tuner Server is the only code that talks to the receiver. Two
   sources sit behind it. The simulated source generates a
   deterministic synthetic spectrum and traffic load, so the whole
@@ -76,14 +94,28 @@ Five organs, one tuner.
   JSONL events out. Each desk runs in its own subprocess under a
   supervisor. A desk that crashes is restarted once; a second crash
   within an hour benches it, and the benching is filed as an event
-  and carried into the products.
+  and carried into the products. The supervisor's timeout applies
+  to the whole job (600 seconds), never per output line, so a slow
+  desk is not mistaken for a crashed one; a worker that dies is a
+  crash the moment it is seen. Each worker's stderr is captured to
+  `desk-stderr-<desk>.log` in the watch folder, and a benching
+  event carries the tail of that log.
 - The Index is an append-only JSONL event log per watch plus a
   SQLite database rebuilt from the logs. Emitters accumulate
   dossiers; aliases (an aircraft's ICAO address, tail number, and
   flight callsign) resolve to one dossier across desks. A snippet
   store keeps bounded audio and imagery evidence under per-desk
   quotas and the profile's disk ceiling, shedding oldest first and
-  logging every shed.
+  logging every shed. Snippet filenames carry the watch id and the
+  bill item id, so two dwells can never produce the same path; a
+  snippet refused by a cap or the ceiling files a refusal event
+  with the reason. Rebuilding the database from the logs preserves
+  the snippet accounting, the event links, and the watch metadata,
+  which the logs themselves do not record. Whether a desk is
+  benched is computed once, from the capability, muster, and
+  supervisor benches together, and every surface (officer state,
+  status, doctor, muster events, the Watch Report) reads that one
+  computation.
 
 Exploitation correlates each new event against the Index and files
 assessment events under five anomaly rules: new emitter, out-of-habit,
@@ -103,7 +135,12 @@ Mode S decoding (CRC, callsign, CPR position pairs, velocity),
 airband voice activity, ACARS (simulated source; benched on the
 real source, above), AIS (types 1 and 5 with checksum), weather
 radio with SAME alert decoding, ISM device bursts, APRS, and
-POCSAG paging with real BCH error checking.
+POCSAG paging with real BCH error checking. Weather radio presence
+from signal energy files as a PROBABLE census; CONFIRMED is
+reserved for an actually decoded SAME header. Mode S position
+pairs are only paired into a global position when the even and odd
+frames arrive within ten seconds of each other, the CPR pairing
+window; older frames expire unpaired.
 
 Tier 2 is implemented where pure Python honestly carries it and
 benched with the reason where it does not. Satellite pass prediction
@@ -138,7 +175,16 @@ transcription bounds, radiosonde sites, and an advanced section
 (gain policy, ephemeris file, interrupt cap, rehearsal outages, and
 the time-scale test knob). The shipped `profiles/default.toml` is
 commented throughout. A profile that fails validation is refused in
-plain words before the watch stands.
+plain words before the watch stands. Validation refuses, among the
+structural checks, a SITREP period of zero or over 24 hours (zero
+would loop the cadence forever), a rotation entry that is not a
+table or carries a bad weight or dwell, a radiosonde site without
+numeric coordinates, a malformed excluded band, a non-numeric
+FLASH watch frequency, an unknown desk or rotation name, and a
+time scale that is not a positive number; a malformed
+`MULTIDEX_TIME_SCALE` environment value refuses the start the same
+way, never silently ignored. The effective time scale is recorded
+in the watch metadata and the muster event.
 
 The shipped default profile selects the real source. If the real
 source cannot be stood at muster (the receiver tools are missing or
@@ -172,12 +218,26 @@ filed. Tuner loss during a dwell becomes a gap event and is counted
 in the coverage account; the watch continues on schedule. On the
 real source a single desk's failed capture is filed as that desk's
 gap and the dwell's other desks still report; a capture stopped at
-its time limit is processed, not lost. An interrupted watch resumes
-from its bill, state file, and event log. The `current_watch`
-pointer is validated against the disk by the status and stop verbs:
-a pointer naming a vanished or completed watch resolves to the
-newest watch still running, so a stop always lands in the folder
-of the watch actually running. Nothing fails silently: every loss
+its time limit is processed, not lost. Multi-channel desks capture
+each channel in isolation: a dead airband or AIS channel records
+its own error and the dwell keeps the other channels' evidence.
+When `multimon-ng` is absent, weather radio presence is still
+reported and the SAME limitation rides in the feed as a note; no
+dwell files both a gap and a presence for the same desk. A capture
+or desk-processing failure of any kind is isolated to its desk,
+and an unexpected failure in one bill item files a system gap and
+the watch continues to the next item; if the officer itself fails,
+a stand-down (final state and Watch Report) is still attempted.
+An interrupted watch resumes from its bill, state file, and event
+log: the muster gates re-run, the bench set is re-filed, FLASH
+numbering continues from the files on disk, dwells already
+executed (known by their dwell records) are not flown twice, and
+the resume event is stamped with the watch clock. The
+`current_watch` pointer is a claim, not a fact: the status and
+stop verbs judge liveness by the officer pid recorded in the
+watch's state file, so a stop lands only in the folder of a watch
+actually running, and a dead watch is reported as interrupted
+rather than presented as live. Nothing fails silently: every loss
 lands in the Index and in the Watch Report's coverage account and
 desk health chapter.
 

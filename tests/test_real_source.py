@@ -289,10 +289,12 @@ def test_missing_optional_tools_file_errors(profile, tmp_path,
     assert "ism" not in feeds and "rtl_433" in source.errors["ism"]
     assert "pager" not in feeds \
         and "multimon-ng" in source.errors["pager"]
-    # The wxradio presence feed survives; only SAME decode is lost,
-    # and that limitation is recorded.
+    # The wxradio presence feed survives, and the SAME limitation
+    # rides in the feed as a note - never as a capture error beside
+    # the feed, which would file the dwell as both failed and heard.
     assert feeds["wxradio"]["present"] is True
-    assert "wxradio" in source.errors
+    assert "wxradio" not in source.errors
+    assert "multimon-ng" in feeds["wxradio"]["same_note"]
 
 
 # ------------------------------------------------ fix 3: the fallback

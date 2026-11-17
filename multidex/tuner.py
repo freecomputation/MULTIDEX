@@ -137,7 +137,11 @@ def demod_modes(raw, rate=2000000):
     frames = []
     seen = set()
     i = 0
-    last = n - (10 + 224)
+    # The data block starts 8 us after the preamble start: at 2 Msps
+    # that is sample 16. Samples 10-15 are the guard interval between
+    # the last preamble pulse and the first data cell; slicing from
+    # sample 10 reads the guard as data and real frames never decode.
+    last = n - (16 + 224)
     while i < last:
         high = min(mag[i], mag[i + 2], mag[i + 7], mag[i + 9])
         if high > mean * 3:
@@ -145,7 +149,7 @@ def demod_modes(raw, rate=2000000):
                       mag[i + 6], mag[i + 8])
             if high > low * 1.8:
                 value = 0
-                base = i + 10
+                base = i + 16
                 for j in range(112):
                     value = (value << 1) | (
                         1 if mag[base + 2 * j] >= mag[base + 2 * j + 1]
@@ -443,6 +447,14 @@ class RealSource:
             except TunerLost as exc:
                 self.errors[desk] = str(exc)
                 continue
+            except Exception as exc:
+                # A desk feed that fails any other way - a tool that
+                # vanished mid-watch, a decode blowup - is that desk's
+                # capture error, filed as a gap by the officer. It
+                # never propagates and takes the dwell, or the watch,
+                # down with it.
+                self.errors[desk] = "%s: %s" % (type(exc).__name__, exc)
+                continue
             if feed is not None:
                 feeds[desk] = feed
         return feeds
@@ -459,13 +471,28 @@ class RealSource:
         dwell = max(t1 - t0, 1.0)
         slice_s = min(12.0, max(2.0, dwell / max(len(vfos), 1)))
         segments = []
+        channel_errors = []
         offset_base = 0.0
         for vfo in vfos:
-            samples = self._audio(vfo["freq_hz"], "am", 12000, slice_s)
-            segments.extend(self._airband_segments(
-                samples, 12000, vfo["freq_hz"], offset_base))
+            # Each channel is captured in isolation: a channel that
+            # produces nothing records its own error and the dwell
+            # keeps every other channel's segments.
+            try:
+                samples = self._audio(vfo["freq_hz"], "am", 12000,
+                                      slice_s)
+            except TunerLost as exc:
+                channel_errors.append({"freq_hz": vfo["freq_hz"],
+                                       "error": str(exc)})
+            else:
+                segments.extend(self._airband_segments(
+                    samples, 12000, vfo["freq_hz"], offset_base))
             offset_base += slice_s
-        return {"segments": segments}
+        if channel_errors and len(channel_errors) == len(vfos):
+            raise TunerLost(channel_errors[0]["error"])
+        feed = {"segments": segments}
+        if channel_errors:
+            feed["channel_errors"] = channel_errors
+        return feed
 
     def _airband_segments(self, samples, rate, freq_hz, offset_base):
         """Envelope segmentation of AM audio, with per-segment SNR
@@ -518,10 +545,23 @@ class RealSource:
 
     def _feed_ais(self, vfos, center_hz, bw_hz, t0, t1):
         sentences = []
+        channel_errors = []
         for vfo in vfos:
-            samples = self._audio(vfo["freq_hz"], "fm", 48000, 10.0)
+            # Per-channel isolation, as on the airband desk: one
+            # dead channel must not discard the other's sentences.
+            try:
+                samples = self._audio(vfo["freq_hz"], "fm", 48000, 10.0)
+            except TunerLost as exc:
+                channel_errors.append({"freq_hz": vfo["freq_hz"],
+                                       "error": str(exc)})
+                continue
             sentences.extend(demod_ais(samples, 48000))
-        return {"sentences": sentences}
+        if channel_errors and len(channel_errors) == len(vfos):
+            raise TunerLost(channel_errors[0]["error"])
+        feed = {"sentences": sentences}
+        if channel_errors:
+            feed["channel_errors"] = channel_errors
+        return feed
 
     def _feed_wxradio(self, vfos, center_hz, bw_hz, t0, t1):
         freq = vfos[0]["freq_hz"]
@@ -530,7 +570,13 @@ class RealSource:
                         / max(len(samples), 1))
         feed = {"present": rms > 300.0, "same": [], "freq_hz": freq}
         if shutil.which("multimon-ng") is None:
-            self.errors["wxradio"] = (
+            # SAME decode is unavailable on this host, but the
+            # broadcast presence above is real evidence and the
+            # dwell heard it: the limitation rides in the feed as a
+            # note, never as a capture error beside the feed - a
+            # dwell cannot be both failed and heard. A gap files
+            # only when the audio capture itself fails.
+            feed["same_note"] = (
                 "multimon-ng is not installed; SAME headers cannot "
                 "be decoded on this host (broadcast presence is "
                 "still reported)")

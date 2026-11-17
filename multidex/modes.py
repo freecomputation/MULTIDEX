@@ -177,15 +177,26 @@ def decode_position(frame_hex, other_frame_hex=None, ref=None):
             return _cpr_pair_decode(other, mine, newer_is_even=False)
         return _cpr_pair_decode(mine, other, newer_is_even=True)
     if ref is not None:
+        # Locally unambiguous decode: the zone is the one that puts
+        # the result nearest the reference (the specification's
+        # rounding), not the zone the reference's floor lands in -
+        # floor alone misplaces the position by a full zone whenever
+        # the reference sits in the far half of its own zone.
         lat_ref, lon_ref = ref
         dlat = 360.0 / (59 if is_odd else 60)
-        lat = dlat * (math.floor(lat_ref / dlat) + cpr_lat / 131072.0)
+        yz = cpr_lat / 131072.0
+        j = math.floor(lat_ref / dlat) + math.floor(
+            0.5 + (lat_ref % dlat) / dlat - yz)
+        lat = dlat * (j + yz)
         if lat >= 270:
             lat -= 360
         ni = _nl(lat) - (1 if is_odd else 0)
         ni = max(ni, 1)
         dlon = 360.0 / ni
-        lon = dlon * (math.floor(lon_ref / dlon) + cpr_lon / 131072.0)
+        xz = cpr_lon / 131072.0
+        m = math.floor(lon_ref / dlon) + math.floor(
+            0.5 + (lon_ref % dlon) / dlon - xz)
+        lon = dlon * (m + xz)
         if lon >= 180:
             lon -= 360
         return (lat, lon)
