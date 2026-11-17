@@ -1,0 +1,121 @@
+# MULTIDEX watch profile - "default"
+#
+# This file is the entire configuration surface. Every knob justifies
+# itself in one line. The shipped values are a complete, sane watch:
+# an operator who never edits this file still gets the full system.
+# Copy this file under a new name to shape a different watch.
+
+name = "default"
+
+[source]
+# Where the spectrum comes from: "simulated" (deterministic synthetic
+# spectrum, no hardware) or "real" (an RTL-SDR through rtl_sdr/rtl_fm).
+kind = "simulated"
+# Seed for the simulated world. Same seed, same spectrum.
+seed = 20261117
+
+[home]
+# Home position. Local only; products describe it at region level only.
+# The shipped values are a reference position in the central United
+# States - set your own before a real watch.
+lat = 39.0
+lon = -98.0
+alt_m = 300
+# Region-level words the products may use for the home position.
+region = "the central United States"
+# Which antenna is on the tuner. Recorded at muster; the coverage
+# account is meaningless without it.
+antenna = "general coverage antenna"
+
+[watch]
+# Watch length in hours. 24 is the standard the system is built around.
+hours = 24
+# SITREP cadence in hours of watch time.
+sitrep_hours = 6
+# Deep census sweep window, local hours: quietest bands, best hunting.
+deep_sweep_start = 1
+deep_sweep_end = 4
+# Hard ceiling on everything the watch writes, snippets included.
+disk_ceiling_gb = 20
+
+[rotation]
+# Class B standing rotation: weight (share of the day) and dwell
+# length in seconds for each entry. The Watch Officer re-weights HF
+# entries by the hour; propagation is not flat and neither is the bill.
+adsb     = { weight = 10, dwell_s = 150 }
+airband  = { weight = 9,  dwell_s = 600 }
+datalink = { weight = 6,  dwell_s = 300 }
+marine   = { weight = 6,  dwell_s = 300 }
+aprs     = { weight = 4,  dwell_s = 240 }
+ism433   = { weight = 5,  dwell_s = 240 }
+ism915   = { weight = 4,  dwell_s = 240 }
+pager    = { weight = 4,  dwell_s = 300 }
+cellular = { weight = 3,  dwell_s = 240 }
+trunking = { weight = 3,  dwell_s = 240 }
+fmband   = { weight = 2,  dwell_s = 180 }
+hf_day   = { weight = 4,  dwell_s = 300 }
+hf_night = { weight = 4,  dwell_s = 300 }
+
+[desks]
+# Desks that stand the watch. Desks absent from this list are benched
+# for the watch. Benched-with-reason desks (design section 7, Tier 2
+# integrations owed) bench themselves regardless; doctor lists them.
+stand = ["adsb", "airband", "acars", "ais", "wxradio", "ism", "aprs",
+         "pager", "sweep", "satellite", "sonde", "cellular",
+         "trunking", "broadcast"]
+# Desks to bench even though they could stand.
+bench = []
+
+[flash]
+# Lowest confidence grade that can raise a FLASH on an assessment.
+threshold_grade = "PROBABLE"
+# Emitter keys that always alert when heard. Empty by default.
+watch_emitters = []
+# Frequencies that always alert when active, in Hz. The 121.5 MHz
+# aviation guard is the standing entry.
+watch_freqs_hz = [121500000]
+guard_hz = 121500000
+
+[snippets]
+# I/Q snippets are kept only for unidentified or anomalous emissions,
+# ten seconds at a time, capped per watch.
+iq_max_per_watch = 100
+# Voice transmissions kept whole, per voice desk, per watch.
+voice_cap_per_desk = 200
+# Satellite imagery is product and is kept whole.
+satellite_keep = true
+
+[transcription]
+# Voice desks whose audio is transcribed in the background. Bounded:
+# transcription never blocks collection and reports its backlog.
+desks = ["airband"]
+cap_per_watch = 40
+
+[excluded]
+# Bands the watch never dwells on, as [low_hz, high_hz] pairs.
+bands = []
+
+[sondes]
+# Regional upper-air launch sites the sonde desk covers. Balloons rise
+# ahead of the synoptic hours and fly for about two hours.
+sites = [
+  { name = "North site", lat = 40.2, lon = -98.3 },
+  { name = "South site", lat = 37.8, lon = -97.6 },
+]
+synoptic_hours = [0, 12]
+
+[advanced]
+# Per-desk tuner gain in dB. A setting that serves airband starves HF;
+# each desk carries its own. 23 dB is the house finding for the site.
+gain_db = { default = 23 }
+# Orbital elements file, resolved beside this profile.
+tle_file = "tle.txt"
+# Interrupts the Watch Officer may take per hour of watch time.
+interrupt_cap_per_hour = 3
+# Test knob: watch-time seconds per real second. 1.0 is a real watch.
+# Higher values run the identical logic paths at speed, for smoke
+# runs and rehearsals. Also settable as MULTIDEX_TIME_SCALE.
+time_scale = 1.0
+# Simulated tuner outages as [start_offset_s, duration_s] pairs, for
+# rehearsing failure behavior. Empty in a real watch.
+tuner_outages = []
