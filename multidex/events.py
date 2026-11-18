@@ -19,6 +19,7 @@ KINDS = (
     "audio",        # an audio emission found by the census, not decoded
     "alert",        # a broadcast alert (SAME header, guard activity)
     "pass",         # a satellite pass or sonde flight milestone
+    "imagery",      # a decoded satellite image filed beside its pass
     "telemetry",    # a tracked object's telemetry (sonde, vessel, aircraft)
     "census",       # a population / presence record (Tier 3, broadcast)
     "dwell",        # a dwell record: the coverage account's raw material

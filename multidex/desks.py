@@ -518,6 +518,61 @@ def _apt_png(feed, image_name):
     return png
 
 
+def _lrpt_event(feed, ctx, base, quality):
+    """The locked-LRPT-pass event: IQ filed as evidence, imagery
+    stated - decoded after the pass when SatDump is staged, not
+    decoded (with the reason) when it is not. This desk never runs
+    the decoder itself and never implies a picture it does not
+    hold: the decode is a bounded post-pass step the officer runs,
+    and its product files with a following imagery event."""
+    data = dict(base, quality=quality, downlink="lrpt",
+                iq=feed.get("iq_name"), iq_rate=feed.get("iq_rate"),
+                iq_bytes=feed.get("iq_bytes"),
+                iq_format=feed.get("iq_format", "cu8"),
+                synthetic=bool(feed.get("iq_synthetic")))
+    payload = {"filename": feed.get("iq_name", "pass.cu8"),
+               "kind": "satellite"}
+    if feed.get("iq_b64"):
+        payload["b64"] = feed["iq_b64"]
+    else:
+        payload["file"] = feed.get("iq_file")
+        payload["bytes"] = feed.get("iq_bytes")
+    trunc = ""
+    if feed.get("iq_truncated"):
+        data["iq_truncated"] = True
+        trunc = ("; the IQ recording was truncated at the "
+                 "reception allocation (%d bytes)"
+                 % (feed.get("iq_bytes") or 0))
+    image_name = "pass-%s-%d.png" % (feed.get("norad"),
+                                     int(ctx["t0"]))
+    data["imagery"] = None
+    if shutil.which("satdump") is None:
+        data["lrpt_decode"] = "not staged"
+        data["imagery_note"] = (
+            "LRPT imagery not decoded: satdump is not staged on "
+            "this host")
+        content = ("pass captured, signal quality %.2f; LRPT IQ "
+                   "filed as evidence%s - LRPT imagery is not "
+                   "decoded: satdump is not staged on this host"
+                   % (quality, trunc))
+    else:
+        data["lrpt_decode"] = "pending"
+        data["imagery_file"] = image_name
+        data["imagery_note"] = (
+            "LRPT imagery decode runs after the pass, outside "
+            "the dwell; the image files with a following "
+            "imagery event")
+        content = ("pass captured, signal quality %.2f; LRPT IQ "
+                   "filed as evidence%s - LRPT imagery decode "
+                   "follows the pass" % (quality, trunc))
+    ev = make_event(
+        ctx["watch_id"], "satellite", "pass", ctx["t0"], ctx["t1"],
+        freq_hz=ctx.get("freq_hz"), emitter=feed.get("sat"),
+        grade="CONFIRMED", content=content, data=data)
+    ev["data"]["_snippet"] = payload
+    return [ev]
+
+
 def process_satellite(feed, ctx):
     p = ctx.get("pass") or {}
     base = {"emitter_kind": "satellite", "sat": feed.get("sat"),
@@ -529,6 +584,20 @@ def process_satellite(feed, ctx):
     if feed.get("lock"):
         data = dict(base, quality=feed.get("quality"))
         quality = feed.get("quality", 0)
+        sat = (feed.get("sat") or "").upper()
+        if "METEOR" in sat:
+            # LRPT downlink: the evidence is raw IQ, never audio.
+            if feed.get("iq_b64") or feed.get("iq_file"):
+                return _lrpt_event(feed, ctx, base, quality)
+            data["imagery"] = None
+            data["imagery_note"] = "the feed carried no pass IQ"
+            return [make_event(
+                ctx["watch_id"], "satellite", "pass", ctx["t0"],
+                ctx["t1"], freq_hz=ctx.get("freq_hz"),
+                emitter=feed.get("sat"), grade="CONFIRMED",
+                content="pass captured, signal quality %.2f; the "
+                        "feed carried no pass IQ" % quality,
+                data=data)]
         if feed.get("audio_b64"):
             # The evidence is the captured pass audio, filed whole.
             # When the imagery step decodes it, the image is filed
@@ -541,19 +610,7 @@ def process_satellite(feed, ctx):
             sat = (feed.get("sat") or "").upper()
             image_name = "pass-%s-%d.png" % (feed.get("norad"),
                                              int(ctx["t0"]))
-            if "METEOR" in sat:
-                # LRPT is a digital downlink and aptdec decodes APT
-                # only; this build does not decode LRPT imagery,
-                # and the event says so rather than implying one.
-                data["imagery"] = None
-                data["imagery_note"] = (
-                    "LRPT imagery is not decoded by this build; "
-                    "the pass audio is filed as evidence")
-                content = ("pass captured, signal quality %.2f; "
-                           "pass audio filed as evidence - imagery "
-                           "is not applicable for LRPT in this build"
-                           % quality)
-            elif "NOAA" not in sat:
+            if "NOAA" not in sat:
                 data["imagery"] = None
                 data["imagery_note"] = (
                     "this satellite's downlink is not classified "

@@ -113,6 +113,8 @@ def maybe_flash(index, watch_id, ev, profile):
     elif ev["kind"] == "pass" and ev["desk"] == "satellite" \
             and ev["grade"] == "CONFIRMED":
         reason = "satellite pass captured"
+    elif ev["kind"] == "imagery" and ev["data"].get("imagery"):
+        reason = "satellite imagery decoded"
     elif ev.get("emitter") and ev["emitter"] in flash["watch_emitters"]:
         reason = "watch-list emitter"
     elif ev["freq_hz"] and any(abs(ev["freq_hz"] - f) < 1.0
@@ -303,6 +305,37 @@ def render_report(index, watch_id):
                  "bound decoder heard on the rotation's HF "
                  "windows and claims nothing about HFDL traffic "
                  "beyond them.")
+    rb = meta.get("reception_budget")
+    if rb:
+        from . import budget as _budget_mod
+        L.append("Reception account: at muster the bill's worst "
+                 "case was allocated %d bytes against a disk "
+                 "ceiling of %d bytes - %d bytes reserved for "
+                 "satellite passes, %d bytes of free margin held "
+                 "back." % (rb["total_bytes"], rb["ceiling_bytes"],
+                            rb["satellite_reserve_bytes"],
+                            rb["free_margin_bytes"]))
+        cls_of = {b["id"]: b["cls"] for b in meta.get("bill", [])}
+        consumed, shed_bytes = {}, {}
+        for row in index.snippet_rows(watch_id):
+            if not row["path"]:
+                continue
+            cls = cls_of.get(
+                _budget_mod.bill_id_of_snippet_path(row["path"]))
+            if cls is None:
+                continue
+            if row["shed"]:
+                shed_bytes[cls] = shed_bytes.get(cls, 0) + row["bytes"]
+            else:
+                consumed[cls] = consumed.get(cls, 0) + row["bytes"]
+        for cls in sorted(rb["by_class"]):
+            L.append("Class %s receptions: allocated %d bytes; "
+                     "%d bytes of evidence kept; %d bytes shed."
+                     % (cls, rb["by_class"][cls]["bytes"],
+                        consumed.get(cls, 0), shed_bytes.get(cls, 0)))
+        for statement in rb.get("degraded") or []:
+            L.append("The reception budget was degraded at "
+                     "muster: %s" % statement)
     L.append("")
     L.append("## 3. Day picture, service by service")
     for desk in sorted(picture["by_desk"]):
@@ -638,4 +671,14 @@ def status_text(home):
     ]
     if meta.get("source_note"):
         lines.append("Source note: %s" % meta["source_note"])
+    bstate = state.get("budget")
+    if bstate:
+        lines.append("Reception budget: %d of %d allocated bytes "
+                     "consumed, %d shed; satellite reserve %d "
+                     "bytes (%d consumed)"
+                     % (bstate["consumed_bytes"],
+                        bstate["allocated_bytes"],
+                        bstate["shed_bytes"],
+                        bstate["satellite_reserve_bytes"],
+                        bstate["satellite_consumed_bytes"]))
     return "\n".join(lines)

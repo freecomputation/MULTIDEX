@@ -327,6 +327,30 @@ def _apt_line(row):
             + img_b + [0.5] * 45)
 
 
+def synthetic_lrpt_iq(seconds=2, rate=None):
+    """A synthetic LRPT-shaped IQ recording (cu8 bytes).
+
+    A marker-grade fixture: QPSK phase points switching at the
+    LRPT symbol rate, deterministic from a fixed seed. It is
+    shaped like the downlink - right rate, right format, plausible
+    constellation - so the satellite desk's IQ plumbing (record,
+    file, hand to the SatDump binding) runs end to end without
+    hardware. It is not a decodable METEOR frame stream, and the
+    feed labels it synthetic wherever it appears.
+    """
+    from .budget import LRPT_IQ_RATE
+    rate = rate or LRPT_IQ_RATE
+    rng = _rng("lrpt-fixture")
+    per_symbol = max(1, int(round(rate / 72000.0)))
+    total = int(seconds * rate)
+    phases = [(200, 200), (200, 55), (55, 55), (55, 200)]
+    out = bytearray()
+    while len(out) < total * 2:
+        i_val, q_val = phases[rng.randrange(4)]
+        out.extend(bytes((i_val, q_val)) * per_symbol)
+    return bytes(out[:total * 2])
+
+
 def synthetic_apt_samples(seconds=12, rate=48000):
     """The synthetic APT recording as a list of int16 samples."""
     env = []
@@ -744,6 +768,22 @@ class SimSource:
                 "max_elev_deg": max_elev, "sat": p.get("sat"),
                 "norad": p.get("norad")}
         if feed["lock"]:
+            if "METEOR" in (p.get("sat") or "").upper():
+                # A locked simulated METEOR pass carries a
+                # synthetic LRPT-shaped IQ recording, labeled
+                # synthetic: the desk files IQ for LRPT, never
+                # audio, on either source.
+                import base64 as _b64
+                from .budget import LRPT_IQ_RATE
+                iq = synthetic_lrpt_iq()
+                feed["iq_b64"] = _b64.b64encode(iq).decode("ascii")
+                feed["iq_name"] = "pass-%s-%d.cu8" % (
+                    p.get("norad"), int(p.get("aos") or 0))
+                feed["iq_rate"] = LRPT_IQ_RATE
+                feed["iq_format"] = "cu8"
+                feed["iq_bytes"] = len(iq)
+                feed["iq_synthetic"] = True
+                return feed
             # A locked simulated pass carries a synthetic APT
             # recording, shaped to the published line format, so
             # the satellite desk records, decodes and files imagery
