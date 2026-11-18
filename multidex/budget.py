@@ -58,18 +58,19 @@ The arithmetic the grants stand on is unchanged from 0.4.1:
   and its worst-case bytes. For a capture the worst case is the
   capture's own arithmetic - sample rate x bytes per sample x
   duration. For a satellite pass it is computed from the actual
-  predicted pass window, APT and LRPT separately.
+  predicted pass window.
 - NOAA APT passes are stored as audio at 11025 Hz, 16-bit mono:
   11025 x 2 = 22050 bytes per second of pass window, plus a
-  stated allowance for the decoded PNG.
-- METEOR LRPT passes are recorded as raw IQ at
-  LRPT_IQ_RATE samples per second in the RTL-SDR's native
-  unsigned 8-bit I/Q (2 bytes per sample): LRPT_IQ_RATE x 2
-  bytes per second of pass window, plus a stated allowance for
-  the decoded PNG. LRPT is a 72 ksym/s QPSK downlink in about
-  140 kHz; the rate is sized to the signal with room for the
-  decoder's resampler, and the reservation is rate x 2 x the
-  predicted window in seconds.
+  stated allowance for the decoded PNG. Standing satellite
+  reservations cover APT passes only.
+- METEOR passes are acknowledged only (0.6.0): the pass is
+  predicted and billed, its pass event states the
+  acknowledgement, and nothing is recorded. A METEOR pass
+  carries a zero-byte allocation, takes no standing
+  reservation and no grant, and a ledger that still holds
+  METEOR reservations from an older build releases them on
+  load, with the release stated on each grant it closes and
+  in the loading surface's account.
 - Desks that file audio snippets are charged at their capture
   rate for the whole dwell - the honest worst case, a dwell
   that never stops talking. Desks that file only event records
@@ -78,6 +79,7 @@ The arithmetic the grants stand on is unchanged from 0.4.1:
 
 import os
 import shutil
+import time
 
 from . import util
 
@@ -86,11 +88,6 @@ from . import util
 APT_STORED_RATE = 11025          # Hz, 16-bit mono WAV as stored
 APT_BYTES_PER_S = APT_STORED_RATE * 2
 APT_PNG_ALLOWANCE = 4_000_000    # bytes, decoded APT image
-
-LRPT_IQ_RATE = 1024000           # samples per second, cu8 IQ
-LRPT_BYTES_PER_SAMPLE = 2        # unsigned 8-bit I + 8-bit Q
-LRPT_BYTES_PER_S = LRPT_IQ_RATE * LRPT_BYTES_PER_SAMPLE
-LRPT_PNG_ALLOWANCE = 8_000_000   # bytes, decoded LRPT image
 
 # Worst-case snippet bytes per second of dwell, per desk: the
 # capture rate of the audio path the desk files snippets from.
@@ -135,13 +132,28 @@ _BILL_ID_RE = _re.compile(r"(bill-\d+)")
 
 
 def downlink_kind(sat_name):
-    """'lrpt', 'apt', or 'other' for a satellite's downlink."""
+    """The allocation class of a satellite's downlink: 'apt'
+    for NOAA (recorded and reserved), 'acknowledged' for a
+    METEOR pass (acknowledged only under the 0.6.0 policy; it
+    allocates nothing), 'other' for anything else (charged at
+    the APT rate, as before)."""
     sat = (sat_name or "").upper()
     if "METEOR" in sat:
-        return "lrpt"
+        return "acknowledged"
     if "NOAA" in sat:
         return "apt"
     return "other"
+
+
+def _acknowledged_pass(item):
+    """True for a METEOR pass bill item: acknowledged only, so
+    it takes no reservation and no grant - its computed
+    allocation is zero bytes, stated as such."""
+    if item.get("kind") != "pass" \
+            or "satellite" not in (item.get("desks") or []):
+        return False
+    return downlink_kind((item.get("pass") or {}).get("sat")) \
+        == "acknowledged"
 
 
 def pass_window_s(item):
@@ -163,15 +175,13 @@ def item_allocation(item):
     if item.get("kind") == "pass" and "satellite" in desks:
         window = pass_window_s(item)
         kind = downlink_kind((item.get("pass") or {}).get("sat"))
-        if kind == "lrpt":
-            nbytes = int(window * LRPT_BYTES_PER_S) \
-                + LRPT_PNG_ALLOWANCE
-        elif kind == "apt":
-            nbytes = int(window * APT_BYTES_PER_S) \
-                + APT_PNG_ALLOWANCE
-        else:
-            nbytes = int(window * APT_BYTES_PER_S) \
-                + APT_PNG_ALLOWANCE
+        if kind == "acknowledged":
+            # Acknowledged only: nothing is recorded, so the
+            # allocation is zero bytes, stated as such wherever
+            # the pass's allocation is reported.
+            return {"tuner_s": dur, "bytes": 0}
+        nbytes = int(window * APT_BYTES_PER_S) \
+            + APT_PNG_ALLOWANCE
         return {"tuner_s": dur, "bytes": nbytes}
     nbytes = 0
     for desk in desks:
@@ -258,6 +268,11 @@ class AllocationLedger:
         self.path = os.path.join(home, LEDGER_FILENAME)
         self.data = data if data is not None else {
             "format": LEDGER_FORMAT, "cap_bytes": None, "grants": []}
+        # Statements a load itself produced (the acknowledgement
+        # policy release below), for the loading surface to file
+        # or print: a policy reconciliation is stated, never
+        # silent.
+        self.load_statements = []
 
     @classmethod
     def load(cls, home):
@@ -273,7 +288,48 @@ class AllocationLedger:
                           if isinstance(g, dict) and g.get("id")]
         data.setdefault("format", LEDGER_FORMAT)
         data.setdefault("cap_bytes", None)
-        return cls(home, data)
+        ledger = cls(home, data)
+        ledger._release_meteor_grants(time.time())
+        return ledger
+
+    # The reason recorded on every grant the acknowledgement
+    # policy closes.
+    _METEOR_RELEASE_REASON = (
+        "released under the METEOR acknowledgement policy: "
+        "METEOR passes are acknowledged only and hold no "
+        "reservation or grant")
+
+    def _release_meteor_grants(self, now):
+        """Reconcile the ledger to the acknowledgement policy:
+        every open grant held for a METEOR pass - a standing
+        reservation taken by an older build, or one a watch
+        adopted from it - is released on load. The release is
+        recorded on each grant (its unspent bytes return to the
+        pool; bytes already consumed stay in the history) and
+        stated in load_statements for the loading surface.
+        Returns the released grants."""
+        released = []
+        for grant in self.grants:
+            if grant.get("status") != "open" \
+                    or "METEOR" not in (grant.get("sat")
+                                        or "").upper():
+                continue
+            grant["released_bytes"] = max(
+                0, grant["bytes"] - grant["consumed_bytes"])
+            grant["status"] = "closed"
+            grant["closed_at"] = now
+            grant["close_reason"] = self._METEOR_RELEASE_REASON
+            released.append(grant)
+        if released:
+            self.save()
+            self.load_statements = [
+                "released %d open METEOR reservation(s) (%d "
+                "bytes) held from an earlier build: METEOR "
+                "passes are acknowledged only and hold no "
+                "reservation or grant under the current policy"
+                % (len(released),
+                   sum(g["released_bytes"] for g in released))]
+        return released
 
     @staticmethod
     def _normalize(grant):
@@ -531,7 +587,9 @@ def refresh_reserves(ledger, profile, sats, now,
                      horizon_s=RESERVE_HORIZON_S):
     """Hold standing reservations for the satellite passes the
     ephemeris predicts in the window ahead, and release the
-    ones whose windows have passed. Reservations are computed
+    ones whose windows have passed. Reservations cover APT
+    passes only: a METEOR pass is acknowledged only and is
+    never reserved. Reservations are computed
     whether or not a watch is standing - a pass that will occur
     during any plausible watch already has its size known.
     They are taken in window order while the pool can carry
@@ -556,6 +614,8 @@ def refresh_reserves(ledger, profile, sats, now,
         for p in passes:
             if "ISS" in p["sat"]:
                 continue  # the ISS desk flies those, not satellite
+            if "METEOR" in p["sat"].upper():
+                continue  # acknowledged only: never reserved
             if any(g["sat"] == p["sat"]
                    and g.get("window_start") is not None
                    and abs(g["window_start"] - p["aos"]) <= _PASS_MATCH_S
@@ -698,7 +758,11 @@ def request_watch_grants(ledger, profile, watch_id, bill, now):
     """
     ledger.set_cap(cap_bytes(profile))
     ledger.expire(now)
-    requests = [_item_request(item) for item in bill]
+    # Acknowledged METEOR passes take no grant at all: they are
+    # filtered out here, so the watch's grant map simply has no
+    # entry for their bill items.
+    requests = [_item_request(item) for item in bill
+                if not _acknowledged_pass(item)]
     adopted = {}
     for req in requests:
         reserve = _find_reserve(ledger, req)
@@ -785,6 +849,8 @@ def reconcile_watch(ledger, profile, watch_id, bill, index, now):
     statements = []
     missing = []
     for item in bill:
+        if _acknowledged_pass(item):
+            continue  # acknowledged only: no grant to reconcile
         bid = item["id"]
         grant = ledger.grant_for(watch_id, bid, status="open")
         if grant is None:

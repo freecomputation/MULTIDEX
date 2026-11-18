@@ -327,28 +327,34 @@ def _apt_line(row):
             + img_b + [0.5] * 45)
 
 
-def synthetic_lrpt_iq(seconds=2, rate=None):
-    """A synthetic LRPT-shaped IQ recording (cu8 bytes).
-
-    A marker-grade fixture: QPSK phase points switching at the
-    LRPT symbol rate, deterministic from a fixed seed. It is
-    shaped like the downlink - right rate, right format, plausible
-    constellation - so the satellite desk's IQ plumbing (record,
-    file, hand to the SatDump binding) runs end to end without
-    hardware. It is not a decodable METEOR frame stream, and the
-    feed labels it synthetic wherever it appears.
-    """
-    from .budget import LRPT_IQ_RATE
-    rate = rate or LRPT_IQ_RATE
-    rng = _rng("lrpt-fixture")
-    per_symbol = max(1, int(round(rate / 72000.0)))
-    total = int(seconds * rate)
-    phases = [(200, 200), (200, 55), (55, 55), (55, 200)]
-    out = bytearray()
-    while len(out) < total * 2:
-        i_val, q_val = phases[rng.randrange(4)]
-        out.extend(bytes((i_val, q_val)) * per_symbol)
-    return bytes(out[:total * 2])
+def synthetic_mbe_archive(fmt="AMBE+2", frames=100, slot=1):
+    """A synthetic vocoder frame archive in the container format
+    DSD-FME's mbe data files use (0.6.0): the 4-byte cookie that
+    names the format, then one record per 20 ms frame - an
+    error-count byte followed by the parameter bits packed
+    (49 bits in 7 bytes for AMBE+2, 88 bits in 11 bytes for
+    IMBE). The parameter bytes are deterministic filler from a
+    fixed seed: shaped like the evidence the digital voice desk
+    archives, labelled synthetic wherever it appears, and never
+    a real call's frames."""
+    if fmt == "IMBE":
+        ext, frame_bytes, param_bits = ".imb", 12, 88
+    else:
+        ext, frame_bytes, param_bits = ".amb", 8, 49
+    rng = _rng("mbe-fixture", fmt, frames, slot)
+    body = bytearray(ext.encode("ascii"))
+    for _ in range(frames):
+        body.append(0)
+        body.extend(rng.randrange(256)
+                    for _ in range(frame_bytes - 1))
+    import base64 as _b64
+    return {"format": fmt, "container": ext,
+            "frame_bytes": frame_bytes, "param_bits": param_bits,
+            "frames": frames, "bytes": len(body), "slot": slot,
+            "source_name": "synthetic-S%s%s" % (slot, ext),
+            "synthetic": True,
+            "association": "synthetic fixture",
+            "b64": _b64.b64encode(bytes(body)).decode("ascii")}
 
 
 def synthetic_apt_samples(seconds=12, rate=48000):
@@ -761,6 +767,14 @@ class SimSource:
 
     def _satellite_feed(self, vfo):
         p = vfo.get("pass") or {}
+        if "METEOR" in (p.get("sat") or "").upper():
+            # Acknowledged only (0.6.0), exactly as the real
+            # source behaves: no lock is computed and no capture
+            # of any kind is attached - the desk files the
+            # acknowledgement from the pass identity alone.
+            return {"sat": p.get("sat"), "norad": p.get("norad"),
+                    "acknowledged": True,
+                    "max_elev_deg": p.get("max_elev_deg", 0)}
         max_elev = p.get("max_elev_deg", 0)
         feed = {"lock": max_elev >= 12.0,
                 "quality": round(min(1.0, max(0.0,
@@ -768,22 +782,6 @@ class SimSource:
                 "max_elev_deg": max_elev, "sat": p.get("sat"),
                 "norad": p.get("norad")}
         if feed["lock"]:
-            if "METEOR" in (p.get("sat") or "").upper():
-                # A locked simulated METEOR pass carries a
-                # synthetic LRPT-shaped IQ recording, labeled
-                # synthetic: the desk files IQ for LRPT, never
-                # audio, on either source.
-                import base64 as _b64
-                from .budget import LRPT_IQ_RATE
-                iq = synthetic_lrpt_iq()
-                feed["iq_b64"] = _b64.b64encode(iq).decode("ascii")
-                feed["iq_name"] = "pass-%s-%d.cu8" % (
-                    p.get("norad"), int(p.get("aos") or 0))
-                feed["iq_rate"] = LRPT_IQ_RATE
-                feed["iq_format"] = "cu8"
-                feed["iq_bytes"] = len(iq)
-                feed["iq_synthetic"] = True
-                return feed
             # A locked simulated pass carries a synthetic APT
             # recording, shaped to the published line format, so
             # the satellite desk records, decodes and files imagery
@@ -891,16 +889,29 @@ class SimSource:
 
     def _digitalvoice_feed(self, center_hz, t0, t1):
         rng = _rng(self.world.seed, int(center_hz), int(t0 // 900))
-        feed = {"calls": []}
+        feed = {"calls": [], "frame_archives": []}
         if rng.random() < 0.6:
-            feed["calls"].append({
+            call = {
                 "protocol": rng.choice(["DMR", "P25", "NXDN"]),
                 "system": "SYS:SIM-%d" % rng.randrange(100, 999),
                 "talkgroup": str(rng.randrange(1, 500)),
                 "source": str(rng.randrange(100000, 999999)),
                 "slot": rng.choice([1, 2]),
                 "encrypted": rng.random() < 0.3,
-                "freq_hz": center_hz})
+                "freq_hz": center_hz}
+            if not call["encrypted"]:
+                # The bound program writes vocoder frames only
+                # for calls it can hear in the clear; the sim
+                # models that product with a labelled synthetic
+                # fixture in the program's own container format
+                # (P25 modelled as Phase 1 IMBE, the TDMA
+                # systems as AMBE+2).
+                call["frames"] = [synthetic_mbe_archive(
+                    "IMBE" if call["protocol"] == "P25"
+                    else "AMBE+2",
+                    frames=rng.randrange(40, 160),
+                    slot=call["slot"])]
+            feed["calls"].append(call)
         return feed
 
     def _sonde_frames(self, t0, t1):

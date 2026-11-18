@@ -15,7 +15,6 @@ are benched with the reason stated, never silently absent.
 import base64
 import math
 import random
-import shutil
 import struct
 
 from . import codecs, modes
@@ -500,59 +499,27 @@ def _apt_decode(feed):
         return None, str(exc)
 
 
-def _lrpt_event(feed, ctx, base, quality):
-    """The locked-LRPT-pass event: IQ filed as evidence, imagery
-    stated - decoded after the pass when SatDump is staged, not
-    decoded (with the reason) when it is not. This desk never runs
-    the decoder itself and never implies a picture it does not
-    hold: the decode is a bounded post-pass step the officer runs,
-    and its product files with a following imagery event."""
-    data = dict(base, quality=quality, downlink="lrpt",
-                iq=feed.get("iq_name"), iq_rate=feed.get("iq_rate"),
-                iq_bytes=feed.get("iq_bytes"),
-                iq_format=feed.get("iq_format", "cu8"),
-                synthetic=bool(feed.get("iq_synthetic")))
-    payload = {"filename": feed.get("iq_name", "pass.cu8"),
-               "kind": "satellite"}
-    if feed.get("iq_b64"):
-        payload["b64"] = feed["iq_b64"]
-    else:
-        payload["file"] = feed.get("iq_file")
-        payload["bytes"] = feed.get("iq_bytes")
-    trunc = ""
-    if feed.get("iq_truncated"):
-        data["iq_truncated"] = True
-        trunc = ("; the IQ recording was truncated at the "
-                 "reception allocation (%d bytes)"
-                 % (feed.get("iq_bytes") or 0))
-    image_name = "pass-%s-%d.png" % (feed.get("norad"),
-                                     int(ctx["t0"]))
-    data["imagery"] = None
-    if shutil.which("satdump") is None:
-        data["lrpt_decode"] = "not staged"
-        data["imagery_note"] = (
-            "LRPT imagery not decoded: satdump is not staged on "
-            "this host")
-        content = ("pass captured, signal quality %.2f; LRPT IQ "
-                   "filed as evidence%s - LRPT imagery is not "
-                   "decoded: satdump is not staged on this host"
-                   % (quality, trunc))
-    else:
-        data["lrpt_decode"] = "pending"
-        data["imagery_file"] = image_name
-        data["imagery_note"] = (
-            "LRPT imagery decode runs after the pass, outside "
-            "the dwell; the image files with a following "
-            "imagery event")
-        content = ("pass captured, signal quality %.2f; LRPT IQ "
-                   "filed as evidence%s - LRPT imagery decode "
-                   "follows the pass" % (quality, trunc))
-    ev = make_event(
+def _meteor_ack_event(feed, ctx, base):
+    """The METEOR pass event under the acknowledgement policy
+    (0.6.0): the pass was predicted and billed, and this event
+    is its whole record. Neither source attempts a capture for
+    a METEOR pass - no scan recording, no audio, no IQ - so
+    there is no lock to report and no evidence to file, and the
+    pass carries a zero-byte allocation, stated in the event.
+    The wording is the policy statement every METEOR pass
+    files, on either source."""
+    sat = feed.get("sat") or (ctx.get("pass") or {}).get("sat")
+    data = dict(base, sat=sat, acknowledged=True, recorded=False,
+                allocation_bytes=0, policy="acknowledgement-only")
+    return [make_event(
         ctx["watch_id"], "satellite", "pass", ctx["t0"], ctx["t1"],
-        freq_hz=ctx.get("freq_hz"), emitter=feed.get("sat"),
-        grade="CONFIRMED", content=content, data=data)
-    ev["data"]["_snippet"] = payload
-    return [ev]
+        freq_hz=ctx.get("freq_hz"), emitter=sat, grade="CONFIRMED",
+        content="pass acknowledged, not recorded: METEOR passes "
+                "are acknowledged only under the acknowledgement "
+                "policy - no capture was attempted, no audio or "
+                "IQ was filed, and the pass carries a zero-byte "
+                "reception allocation",
+        data=data)]
 
 
 def process_satellite(feed, ctx):
@@ -563,23 +530,16 @@ def process_satellite(feed, ctx):
             "pass": {k: p.get(k) for k in
                      ("aos", "los", "t_max", "max_elev_deg",
                       "aos_az_deg", "los_az_deg")}}
+    sat_name = feed.get("sat") or p.get("sat") or ""
+    if "METEOR" in sat_name.upper():
+        # Acknowledgement only, decided before any lock logic:
+        # the sources do not capture METEOR passes at all, so a
+        # METEOR feed carries no lock and no recording, whatever
+        # an older feed shape might still attach to it.
+        return _meteor_ack_event(feed, ctx, base)
     if feed.get("lock"):
         data = dict(base, quality=feed.get("quality"))
         quality = feed.get("quality", 0)
-        sat = (feed.get("sat") or "").upper()
-        if "METEOR" in sat:
-            # LRPT downlink: the evidence is raw IQ, never audio.
-            if feed.get("iq_b64") or feed.get("iq_file"):
-                return _lrpt_event(feed, ctx, base, quality)
-            data["imagery"] = None
-            data["imagery_note"] = "the feed carried no pass IQ"
-            return [make_event(
-                ctx["watch_id"], "satellite", "pass", ctx["t0"],
-                ctx["t1"], freq_hz=ctx.get("freq_hz"),
-                emitter=feed.get("sat"), grade="CONFIRMED",
-                content="pass captured, signal quality %.2f; the "
-                        "feed carried no pass IQ" % quality,
-                data=data)]
         if feed.get("audio_b64"):
             # The evidence is the captured pass audio, filed whole.
             # When the imagery step decodes it, the image is filed
@@ -1009,17 +969,94 @@ def process_vdl2(feed, ctx):
 
 # --------------------------------------------------------- digital voice
 
+# The decode gate each archived frame format stands under,
+# stated in every event that archives it: the frames are
+# evidence, not audio, until the named build exists.
+_FRAME_GATE_TEXT = {
+    "AMBE+2": ("the frames are archived undecodable until the "
+               "in-house synthesizer exists and the US8359197 "
+               "gate opens on 2028-05-20"),
+    "IMBE": "the frames await the in-house IMBE build",
+}
+
+
+def _frame_archive_parts(archives):
+    """Render vocoder frame archives for a desk event: the
+    content suffix stating what was archived and the gate it
+    stands under, the provenance records for the event data,
+    and the payload snippets. An archive is the de-interleaved
+    vocoder parameter frames the bound program wrote beside
+    its log, in its own container (see multidex.tuner); the
+    snippet kind is 'payload' - payload-class evidence, which
+    the snippet store never sheds."""
+    text = ""
+    records = []
+    payloads = []
+    for arc in archives:
+        fmt = arc.get("format") or "AMBE+2"
+        gate = _FRAME_GATE_TEXT.get(
+            fmt, "the frames await an in-house vocoder build")
+        text += ("; vocoder frames archived as payload "
+                 "evidence: %d %s parameter frames (%d bytes) "
+                 "from %s - %s"
+                 % (arc.get("frames", 0), fmt,
+                    arc.get("bytes", 0),
+                    arc.get("source_name") or "the capture",
+                    gate))
+        records.append({
+            "format": fmt, "container": arc.get("container"),
+            "frames": arc.get("frames"),
+            "bytes": arc.get("bytes"),
+            "param_bits": arc.get("param_bits"),
+            "slot": arc.get("slot"),
+            "source_name": arc.get("source_name"),
+            "association": arc.get("association"),
+            "synthetic": bool(arc.get("synthetic"))})
+        payloads.append({
+            "filename": arc.get("source_name") or "frames.amb",
+            "kind": "payload", "b64": arc.get("b64")})
+    return text, records, payloads
+
+
+def _attach_archives(ev, archives):
+    """Attach frame archives to an event already made: the
+    content statement, the provenance records, and one payload
+    snippet per archive."""
+    text, records, payloads = _frame_archive_parts(archives)
+    ev["content"] = (ev["content"] or "") + text
+    ev["data"].setdefault("frame_archives", []).extend(records)
+    existing = ev["data"].get("_snippet")
+    if existing is None:
+        ev["data"]["_snippet"] = (payloads[0]
+                                  if len(payloads) == 1
+                                  else payloads)
+    else:
+        if isinstance(existing, dict):
+            existing = [existing]
+        ev["data"]["_snippet"] = existing + payloads
+
+
 def process_digitalvoice(feed, ctx):
-    """Metadata only, by design and by licence: this desk reports
-    the signalling a DSD-FME-class program decodes - system,
-    talkgroup, source, slot, encryption flag. It does not decode
-    voice: intelligible DMR/P25/NXDN voice needs an AMBE-family
-    vocoder this build does not carry, and no event here claims
-    otherwise."""
+    """Signalling metadata, and the vocoder frames themselves
+    as evidence: this desk reports the signalling a
+    DSD-FME-class program decodes - system, talkgroup, source,
+    slot, encryption flag - and, since 0.6.0, archives the
+    de-interleaved vocoder parameter frames the same program
+    writes beside its log as payload-class evidence linked to
+    the call's event and the emitter's dossier. It does not
+    decode voice: intelligible DMR/P25/NXDN voice needs an
+    AMBE-family vocoder this build does not carry, and no
+    event here claims otherwise. The archived frames are
+    stated for what they are: AMBE+2 frames are archived
+    undecodable until the in-house synthesizer exists and the
+    US8359197 gate opens on 2028-05-20, and IMBE frames await
+    the in-house IMBE build. The bound program writes frames
+    only for calls it can hear in the clear (or with a
+    keystream), so an encrypted call archives no frames."""
     out = []
     for call in feed.get("calls", []):
         enc = "encrypted" if call.get("encrypted") else "in the clear"
-        out.append(make_event(
+        ev = make_event(
             ctx["watch_id"], "digitalvoice", "decode", ctx["t0"],
             ctx["t1"], freq_hz=call.get("freq_hz"),
             emitter=call.get("system"), grade="CONFIRMED",
@@ -1035,7 +1072,34 @@ def process_digitalvoice(feed, ctx):
                   "source": call.get("source"),
                   "slot": call.get("slot"),
                   "encrypted": bool(call.get("encrypted")),
-                  "voice_decoded": False}))
+                  "voice_decoded": False})
+        if call.get("frames"):
+            _attach_archives(ev, call["frames"])
+        out.append(ev)
+    leftovers = feed.get("frame_archives") or []
+    if leftovers:
+        # Frames the feed could not associate with a call the
+        # log parser read. They are still archived - frames not
+        # captured are lost - under the capture window's own
+        # provenance, never silently attached to a call they
+        # may not belong to.
+        for arc in leftovers:
+            arc.setdefault("association", "capture window")
+        if out:
+            _attach_archives(out[0], leftovers)
+        else:
+            ev = make_event(
+                ctx["watch_id"], "digitalvoice", "decode",
+                ctx["t0"], ctx["t1"], freq_hz=ctx.get("freq_hz"),
+                emitter=None, grade="PROBABLE",
+                content="vocoder frames archived from a digital "
+                        "voice capture whose signalling the log "
+                        "parser did not read; voice is not "
+                        "decoded by this build",
+                data={"emitter_kind": "radio_system",
+                      "voice_decoded": False})
+            _attach_archives(ev, leftovers)
+            out.append(ev)
     return out
 
 

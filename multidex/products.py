@@ -356,6 +356,16 @@ def render_report(index, watch_id):
                      % (cls, g["granted"],
                         consumed.get(cls, 0), g["released"],
                         shed_bytes.get(cls, 0)))
+        _payload_rows = [r for r in index.snippet_rows(watch_id)
+                         if r["kind"] == "payload" and not r["shed"]]
+        if _payload_rows:
+            L.append("Payload-class evidence (vocoder frame "
+                     "archives): %d files, %d bytes kept. "
+                     "Payload evidence is permanent Tier-0 "
+                     "evidence: it is exempt from shedding "
+                     "under the ceiling."
+                     % (len(_payload_rows),
+                        sum(r["bytes"] for r in _payload_rows)))
         for statement in (meta.get("reception_grants") or {}).get(
                 "statements") or []:
             L.append("The watch's grants were reduced at "

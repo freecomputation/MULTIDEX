@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.5.0.
+Version 0.6.0.
 
 ## The verbs
 
@@ -129,7 +129,9 @@ Five organs, one tuner.
   flight callsign) resolve to one dossier across desks. A snippet
   store keeps bounded audio and imagery evidence under per-desk
   quotas and the profile's disk ceiling, shedding oldest first and
-  logging every shed. Snippet filenames carry the watch id and the
+  logging every shed, with one exemption: payload-class evidence
+  (the digital voice desk's vocoder frame archives) is permanent
+  and is never shed. Snippet filenames carry the watch id and the
   bill item id, so two dwells can never produce the same path; a
   snippet refused by a cap or the ceiling files a refusal event
   with the reason. Since 0.4.2 the snippet store sits inside a
@@ -143,9 +145,9 @@ Five organs, one tuner.
   bytes from its capture rate and duration, satellite passes
   from their predicted AOS-to-LOS windows (an APT pass reserves
   its stored-audio rate of 22,050 bytes per second of window
-  plus an image allowance; an LRPT pass reserves 2,048,000
-  bytes per second of window plus an image allowance).
-  Satellite passes hold standing reservations in the ledger,
+  plus an image allowance; a METEOR pass is acknowledged only
+  and carries a zero-byte allocation - no reservation, no
+  grant). Satellite passes hold standing reservations in the ledger,
   computed from the ephemeris for the windows ahead whether or
   not a watch is standing, and a reservation whose window
   passes unclaimed expires and releases on its own. At muster
@@ -162,8 +164,7 @@ Five organs, one tuner.
   way, shrunk or refused with the reason filed. During the
   watch, kept evidence is consumed against its grant, a
   capture that reaches its grant stops at the boundary with
-  the truncation stated in its event (the LRPT IQ capture is
-  the first citizen of this rule), and a grant's unspent
+  the truncation stated in its event, and a grant's unspent
   remainder releases back to the pool when its dwell or pass
   ends. Cancelling or stopping a watch releases all of its
   unspent grants at once, while its filed receptions stay
@@ -176,7 +177,8 @@ Five organs, one tuner.
   the grant it was filed under. The Watch Report carries the
   reception account - this watch's slice of the standing
   ledger: granted against kept against released against shed,
-  per class - beside the coverage account, and `doctor` and
+  per class, with the payload-class evidence it holds and its
+  shedding exemption stated - beside the coverage account, and `doctor` and
   status report the pool's own figures (cap, consumed,
   reserved, free) whether or not a watch stands. `budget.json`
   in a watch directory is a snapshot of the ledger at muster,
@@ -236,19 +238,20 @@ invoked. The image files with the pass event and is named in the
 event and its FLASH; a recording that holds no decodable APT
 states that its imagery was not decoded, with the decoder's
 reason. METEOR satellites fly
-an LRPT digital downlink (72 ksym/s QPSK family in about
-140 kHz): on a lock the real source records raw IQ for the whole
-remaining pass at 1,024,000 samples per second in the dongle's
-native unsigned 8-bit format - 2 bytes per complex sample, so
-2,048,000 bytes per second of pass - and the recording is filed
-as the pass evidence. When SatDump is staged on the host, the
-recorded IQ is decoded after the pass, outside the dwell, into
-imagery that files with a following imagery event and is named
-in its FLASH, the same discipline as APT; when SatDump is not
-staged, the pass files its IQ and states that LRPT imagery was
-not decoded because satdump is not staged. The simulated source
-produces a synthetic LRPT-shaped IQ fixture for a locked METEOR
-pass, labelled synthetic wherever it appears. Radiosonde
+an LRPT digital downlink, and are handled under an
+acknowledgement policy: a METEOR pass is acknowledged only.
+Its passes are still predicted and billed like any other, and
+the pass event states that the pass was acknowledged and not
+recorded under the policy; neither source attempts a capture
+of any kind for a METEOR pass - no audio, no IQ - and no
+standing reservation or grant is taken for one, its allocation
+being zero bytes, stated as such in the event. A home whose
+allocation ledger still holds METEOR reservations taken by an
+earlier build releases them when the ledger is next loaded,
+with the release recorded on each grant and stated by the
+loading surface. NOAA APT passes are unaffected by the policy:
+full reservation, whole-pass recording, and decode through the
+package's own APT decoder. Radiosonde
 windows are scheduled from
 configured sites and synoptic hours; against the real source the
 sonde desk files a presence census of carriers in the sonde band
@@ -266,6 +269,32 @@ antenna. Transcription binds the host's faster-whisper stack the
 same conditional way; where no engine is bound, voice audio is
 filed as snippets and products report transcripts as not produced
 rather than inventing them.
+
+The digital voice desk files two products from a capture. The
+first is the call signalling the bound program decodes - system,
+talkgroup, source, slot, encryption flag - as metadata; voice
+itself is not decoded, and no event claims otherwise. The second,
+since 0.6.0, is the vocoder frame archive: the program is invoked
+with its mbe data output enabled, and the de-interleaved vocoder
+parameter frames it writes - the 49-bit AMBE+2 parameter frames
+for DMR, P25 Phase 2 and NXDN, the IMBE frames for P25 Phase 1 -
+are harvested after the run and archived as payload-class
+evidence, linked to the desk event and the emitter dossier, with
+their provenance (system, talkgroup or source where known, slot,
+frame count, the capture window) recorded in the event. The
+archive is small by construction: 49 parameter bits per 20 ms
+frame is about 306 bytes per second of speech, 400 bytes per
+second in the program's container with its per-frame error byte.
+Payload-class evidence is permanent Tier-0 evidence, exempt from
+shedding under the disk ceiling, and the reception account states
+its bytes and the exemption. The frames are evidence, not audio:
+AMBE+2 frames are archived undecodable until the in-house
+synthesizer exists and the US8359197 gate opens on 2028-05-20,
+and IMBE frames await the in-house IMBE build; each archiving
+event says so. The program writes frames only for calls it can
+hear in the clear (or with a keystream), so an encrypted call
+archives no frames - the desk reports its signalling and states
+the call was encrypted, and that is all.
 
 Tier 3 desks are metadata-only by design: cellular and trunking
 censuses count systems, bands, and activity and never attempt content.
