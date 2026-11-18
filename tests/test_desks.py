@@ -96,10 +96,10 @@ def test_sweep_desk_marks_unknowns(profile):
 
 def test_satellite_desk_lock_and_miss(profile):
     # A locked feed from either source carries the pass recording;
-    # the desk files it and states the imagery outcome. aptdec is
-    # not staged in the test environment, so the outcome stated is
-    # the honest not-decoded one (the decode itself is covered by
-    # tests/test_fixes_020.py where a decoder is available).
+    # the desk files it and states the imagery outcome. The feed
+    # below is a spec-shaped synthetic APT recording, so the
+    # package's own decoder produces the image (the content proof
+    # is in tests/test_fixes_050.py).
     from multidex.sim import synthetic_apt_samples
     from multidex.tuner import _wav_b64
     ok = desks.process_satellite(
@@ -118,7 +118,7 @@ def test_satellite_desk_lock_and_miss(profile):
     # The imagery outcome is always stated: either an image was
     # decoded and filed, or the event says why none was.
     if ok[0]["data"]["imagery"] is None:
-        assert "aptdec" in ok[0]["data"]["imagery_note"]
+        assert "not decoded" in ok[0]["data"]["imagery_note"]
     else:
         assert ok[0]["data"]["imagery"].endswith(".png")
     miss = desks.process_satellite(

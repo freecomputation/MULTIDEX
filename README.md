@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.4.2.
+Version 0.5.0.
 
 ## The verbs
 
@@ -57,7 +57,13 @@ anything it cannot get is a refusal with the reason in plain words.
   frequency such as `121.5 MHz`, a band such as `band uhf`, or a
   service such as `adsb`.
 - `multidex doctor` - the muster checks and the full desk inventory
-  with tiers, states, and bench reasons.
+  with tiers, states, and bench reasons, and the dependence
+  census: every external program this build invokes, the desk or
+  function that uses it, and whether it is present on the host.
+  Each entry is a stated dependence, retired only when an own
+  implementation replaces it; the census is printed from the
+  binding table itself, and the test suite asserts it names
+  every program the package source invokes.
 
 Run it from this tree with `./bin/multidex`, or as a module with
 `python3 -m multidex`. Global options come before the verb:
@@ -220,11 +226,16 @@ PROBABLE wherever it appears. On a lock, a NOAA pass is recorded
 whole - the real source for the whole remaining pass at maximum
 tuner gain, stored at 11025 Hz, the simulated source as a
 synthetic recording shaped to the published APT line format -
-and the recording is filed as the pass evidence. When aptdec is staged on the host, the
-satellite desk decodes a NOAA pass recording into APT imagery,
-files the image with the pass event, and names it in the event and
-its FLASH; when aptdec is not staged, the pass states that its
-imagery was not decoded, with the reason. METEOR satellites fly
+and the recording is filed as the pass evidence. The satellite
+desk decodes a NOAA pass recording into APT imagery with the
+package's own APT decoder (multidex.apt): envelope recovery from
+the 2400 Hz subcarrier, line framing on the APT sync patterns,
+grey levels calibrated from the sync pulses themselves, and a
+PNG written by the build's own encoder - no external program is
+invoked. The image files with the pass event and is named in the
+event and its FLASH; a recording that holds no decodable APT
+states that its imagery was not decoded, with the decoder's
+reason. METEOR satellites fly
 an LRPT digital downlink (72 ksym/s QPSK family in about
 140 kHz): on a lock the real source records raw IQ for the whole
 remaining pass at 1,024,000 samples per second in the dongle's

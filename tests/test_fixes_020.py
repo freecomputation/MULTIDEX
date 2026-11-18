@@ -5,13 +5,17 @@ feed used to record an 8-second sample of a pass at the house
 gain, and the one real pass recording it produced held no APT
 subcarrier at all - a flat noise spectrum, undecodable in
 principle. APT imagery needs the whole pass, recorded at maximum
-gain like the ADS-B capture (0.1.3), and a decoder: aptdec, used
-when it is staged on the host and stated as absent when it is
-not. METEOR-M2 4 flies LRPT, a digital downlink aptdec does not
-decode; through 0.4.0 its passes said imagery was not
-applicable. The 0.4.1 contract supersedes that: an LRPT pass
-files raw IQ and states its decode state - see
-tests/test_fixes_041.py, which carries the LRPT tests now.
+gain like the ADS-B capture (0.1.3), and a decoder. Through
+0.4.x the decoder was the aptdec program, bound when staged on
+the host and stated as absent when it was not; 0.5.0 retired
+that binding for the package's own APT decoder (multidex.apt),
+and the content-level ground truth for the decoder lives in
+tests/test_fixes_050.py. METEOR-M2 4 flies LRPT, a digital
+downlink the APT decoder does not address; through 0.4.0 its
+passes said imagery was not applicable. The 0.4.1 contract
+supersedes that: an LRPT pass files raw IQ and states its
+decode state - see tests/test_fixes_041.py, which carries the
+LRPT tests now.
 """
 
 import array
@@ -20,8 +24,6 @@ import os
 import struct
 import time
 
-import pytest
-
 from multidex import desks, products, tuner
 from multidex.sim import SimSource, synthetic_apt_samples
 from multidex.tuner import RealSource, _resample_int16, _wav_b64
@@ -29,13 +31,6 @@ from multidex.tuner import RealSource, _resample_int16, _wav_b64
 from conftest import T0
 
 W = "watch-t"
-
-REAL_APTDEC = os.environ.get(
-    "MULTIDEX_TEST_APTDEC",
-    "/home/hatch/workspace/apt-proof/aptdec/build/aptdec")
-needs_aptdec = pytest.mark.skipif(
-    not os.path.exists(REAL_APTDEC),
-    reason="no aptdec binary available for the fixture decode")
 
 
 def _ctx(profile, desk, t0=T0, t1=T0 + 600, **kw):
@@ -62,17 +57,6 @@ def _apt_feed(sat="NOAA 19", norad="33591", seconds=12, rate=48000):
             "audio_rate": rate}
 
 
-@pytest.fixture()
-def fake_aptdec(tmp_path):
-    """A directory holding an `aptdec` that execs the real binary."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "aptdec"
-    script.write_text("#!/bin/sh\nexec \"%s\" \"$@\"\n" % REAL_APTDEC)
-    script.chmod(0o755)
-    return str(bin_dir)
-
-
 def _png_dims(png):
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     return struct.unpack(">II", png[16:24])
@@ -80,11 +64,7 @@ def _png_dims(png):
 
 # ------------------------------------------------- the imagery step
 
-@needs_aptdec
-def test_apt_imagery_decodes_from_spec_shaped_wav(profile, monkeypatch,
-                                                  fake_aptdec):
-    monkeypatch.setenv(
-        "PATH", fake_aptdec + os.pathsep + os.environ.get("PATH", ""))
+def test_apt_imagery_decodes_from_spec_shaped_wav(profile):
     events = desks.process_satellite(
         _apt_feed(), _ctx(profile, "satellite", **{"pass": _pass()}))
     ev = events[0]
@@ -100,18 +80,18 @@ def test_apt_imagery_decodes_from_spec_shaped_wav(profile, monkeypatch,
     assert snippets[1]["filename"] == image_name
     width, height = _png_dims(base64.b64decode(snippets[1]["b64"]))
     assert width == 2080
-    assert height == 22  # 12 s at 2 lines/s, edge lines unframed
+    # 12 s at 2 lines/s, every line framed on its own sync by the
+    # package's decoder (the retired aptdec binding framed 22,
+    # dropping the edge lines; the content proof for all 24 is
+    # in tests/test_fixes_050.py).
+    assert height == 24
+    assert ev["data"]["imagery_decode"]["lines"] == 24
 
 
-@needs_aptdec
-def test_apt_imagery_decodes_the_stored_11025_copy(profile,
-                                                   monkeypatch,
-                                                   fake_aptdec):
+def test_apt_imagery_decodes_the_stored_11025_copy(profile):
     # The real source stores pass audio resampled to 11025 Hz;
     # the imagery step must decode that copy, not only the 48 kHz
     # capture rate.
-    monkeypatch.setenv(
-        "PATH", fake_aptdec + os.pathsep + os.environ.get("PATH", ""))
     samples = synthetic_apt_samples(12, 48000)
     stored = _resample_int16(array.array("h", samples), 48000, 11025)
     feed = {"lock": True, "quality": 0.8, "sat": "NOAA 19",
@@ -125,14 +105,10 @@ def test_apt_imagery_decodes_the_stored_11025_copy(profile,
     assert ev["data"]["imagery"] is not None
     png = base64.b64decode(ev["data"]["_snippet"][1]["b64"])
     width, height = _png_dims(png)
-    assert width == 2080 and height >= 20
+    assert width == 2080 and height >= 22
 
 
-@needs_aptdec
-def test_flash_names_the_image(profile, index, monkeypatch,
-                               fake_aptdec):
-    monkeypatch.setenv(
-        "PATH", fake_aptdec + os.pathsep + os.environ.get("PATH", ""))
+def test_flash_names_the_image(profile, index):
     index.set_watch_meta(W, {
         "watch_id": W, "start": T0, "planned_end": T0 + 86400,
         "end": None, "source": "real", "profile_name": "t",
@@ -150,37 +126,36 @@ def test_flash_names_the_image(profile, index, monkeypatch,
 
 # ------------------------------------------------------- honesty
 
-def test_absent_aptdec_is_stated_not_silent(profile, monkeypatch,
-                                            tmp_path):
-    monkeypatch.setenv("PATH", str(tmp_path))  # no aptdec anywhere
-    assert desks.shutil.which("aptdec") is None
+def test_undecodable_audio_is_stated_not_silent(profile):
+    # A locked pass whose audio holds no APT at all (here:
+    # silence) files its audio and states the own decoder's
+    # reason - never a silent missing image, never an invented
+    # one. (Through 0.4.x this test asserted the aptdec-absent
+    # statement; the binding is retired, so the honesty now rides
+    # on the decoder's own verdict.)
+    feed = {"lock": True, "quality": 0.8, "sat": "NOAA 19",
+            "norad": "33591",
+            "audio_b64": _wav_b64([0] * 96000, 48000),
+            "audio_name": "pass-33591-%d.wav" % int(T0),
+            "audio_rate": 48000}
     events = desks.process_satellite(
-        _apt_feed(seconds=2),
-        _ctx(profile, "satellite", **{"pass": _pass()}))
+        feed, _ctx(profile, "satellite", **{"pass": _pass()}))
     ev = events[0]
     assert ev["grade"] == "CONFIRMED"
     assert ev["data"]["imagery"] is None
-    assert "aptdec is not staged" in ev["data"]["imagery_note"]
+    assert "no APT sync found" in ev["data"]["imagery_note"]
     assert "not decoded" in ev["content"]
     snippet = ev["data"]["_snippet"]
     assert isinstance(snippet, dict)
     assert snippet["filename"].endswith(".wav")
 
 
-@needs_aptdec
 def test_meteor_lrpt_files_iq_not_audio(profile, monkeypatch,
                                         tmp_path):
     # The 0.4.1 contract: a locked METEOR pass files raw IQ,
-    # never audio, and aptdec never runs for it. With no satdump
-    # on PATH the pass states its imagery was not decoded.
-    marker = tmp_path / "aptdec-ran"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "aptdec"
-    script.write_text("#!/bin/sh\ntouch \"%s\"\n" % marker)
-    script.chmod(0o755)
-    monkeypatch.setenv(
-        "PATH", str(bin_dir) + os.pathsep + "/usr/bin:/bin")
+    # never audio, and the APT path never runs for it. With no
+    # satdump on PATH the pass states its imagery was not decoded.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     from multidex.sim import synthetic_lrpt_iq
     iq = synthetic_lrpt_iq(seconds=1)
     feed = {"lock": True, "quality": 0.8, "sat": "METEOR-M2 4",
@@ -198,7 +173,6 @@ def test_meteor_lrpt_files_iq_not_audio(profile, monkeypatch,
     assert ev["data"]["lrpt_decode"] == "not staged"
     assert "satdump is not staged" in ev["content"]
     assert ev["data"]["synthetic"] is True
-    assert not marker.exists()  # the APT decoder was never run
     snippet = ev["data"]["_snippet"]
     assert isinstance(snippet, dict)
     assert snippet["filename"].endswith(".cu8")

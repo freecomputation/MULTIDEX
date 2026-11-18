@@ -23,7 +23,8 @@ multimon-ng - and feeds the standing desks from real captures:
 - satellite passes are fed by a measured signal lock on the pass
   frequency; on a lock the whole remaining pass is recorded at
   maximum gain and filed as evidence, and the satellite desk
-  decodes APT imagery from that recording when aptdec is staged.
+  decodes APT imagery from that recording with the package's
+  own decoder (multidex.apt).
   A METEOR pass is a digital LRPT downlink, not audio: on a lock
   the pass is recorded as raw IQ at the LRPT rate, bounded by
   the reception allocation the officer put on the vfo, and the
@@ -653,10 +654,8 @@ class RealSource:
             detail += "; %s %s" % (
                 tool, "present" if shutil.which(tool) else
                 "absent (its desks file the loss per dwell)")
-        detail += "; aptdec %s" % (
-            "present" if shutil.which("aptdec") else
-            "absent (satellite passes file their audio; APT imagery "
-            "is reported not decoded)")
+        detail += "; APT imagery is decoded by the package's " \
+                  "own decoder (no external program)"
         detail += "; satdump %s" % (
             "present" if shutil.which("satdump") else
             "absent (METEOR passes file their IQ; LRPT imagery is "

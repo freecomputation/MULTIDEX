@@ -10,6 +10,14 @@ linked, never bundled. When the program is absent the desk
 benches with the staging instruction as its reason, stated on
 every surface that reports the bench. Nothing here pretends a
 missing tool is present.
+
+Every such binding is a dependence, and the dependence census
+at the bottom of this module is the standing account of them:
+the doctor prints it, and the test suite asserts it names
+every program the package source invokes, so a binding cannot
+be added quietly. An entry leaves the census only when an own
+implementation retires it - as the package's own APT decoder
+(multidex.apt) retired the aptdec binding in 0.5.0.
 """
 
 import shutil
@@ -51,3 +59,68 @@ TOOL_DESKS = {
              "and audio census desks on every HF dwell and no "
              "HFDL decode is claimed"),
 }
+
+
+# ------------------------------------------------------ the census
+#
+# The dependence census: every external program this package
+# can invoke, the desk or function that depends on it, and how
+# its presence is probed - "path" programs are looked up on the
+# PATH, "module" entries are host Python stacks probed by
+# import. The table is the single source the doctor's census
+# section is printed from, and the suite holds it honest from
+# the other side: an AST scan of the package source collects
+# every program the code actually invokes, and the two sets
+# must be equal (tests/test_fixes_050.py). The operating system
+# and its libraries are substrate, not dependences, and are not
+# listed; the package's own worker processes are this package,
+# not another person's program, and are not listed either.
+
+# (display name, probe target, probe kind, used by)
+DEPENDENCES = (
+    ("rtl_sdr", "rtl_sdr", "path",
+     "the tuner server - real-source IQ capture"),
+    ("rtl_fm", "rtl_fm", "path",
+     "the tuner server - real-source audio capture"),
+    ("rtl_433", "rtl_433", "path",
+     "the ISM desk feed"),
+    ("multimon-ng", "multimon-ng", "path",
+     "the pager, APRS and weather radio desk feeds"),
+    ("jt9", "jt9", "path",
+     "the amateur desk - FT8 decode"),
+    ("dumpvdl2", "dumpvdl2", "path",
+     "the VDL2 desk"),
+    ("dsd-fme", "dsd-fme", "path",
+     "the digital voice desk"),
+    ("dumphfdl", "dumphfdl", "path",
+     "the HFDL desk"),
+    ("satdump", "satdump", "path",
+     "the satellite desk - LRPT imagery decode after a "
+     "METEOR pass"),
+    ("faster-whisper", "faster_whisper", "module",
+     "transcription - the host faster-whisper stack"),
+    ("chronyc", "chronyc", "path",
+     "the muster clock gate"),
+    ("pw-play", "pw-play", "path",
+     "the FLASH chime"),
+    ("paplay", "paplay", "path",
+     "the FLASH chime"),
+    ("aplay", "aplay", "path",
+     "the FLASH chime"),
+)
+
+
+def dependence_census():
+    """The census as data: one row per dependence, with its
+    presence on this host probed the way the binding itself
+    probes it."""
+    import importlib.util
+    rows = []
+    for display, target, kind, used_by in DEPENDENCES:
+        if kind == "module":
+            present = importlib.util.find_spec(target) is not None
+        else:
+            present = tool_available(target)
+        rows.append({"program": display, "used_by": used_by,
+                     "present": present})
+    return rows

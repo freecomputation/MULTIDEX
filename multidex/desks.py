@@ -14,12 +14,9 @@ are benched with the reason stated, never silently absent.
 
 import base64
 import math
-import os
 import random
 import shutil
 import struct
-import subprocess
-import tempfile
 
 from . import codecs, modes
 from .bands import band_name
@@ -486,36 +483,21 @@ def process_pager(feed, ctx):
 
 # ------------------------------------------------------------- satellite
 
-def _apt_png(feed, image_name):
-    """Decode the feed's APT pass audio with aptdec, when staged.
+def _apt_decode(feed):
+    """Decode the feed's APT pass audio with the package's own
+    APT decoder (multidex.apt).
 
-    Returns the PNG bytes, or None when aptdec is absent, fails, or
-    produces no image from this audio. The desk never invents an
-    image: a recording with no decodable APT subcarrier in it files
-    its audio and the event states that no image was produced.
+    Returns (png_bytes, info) on success, or (None, reason) with
+    the decoder's plain-word reason. The desk never invents an
+    image: a recording with no decodable APT in it files its
+    audio and the event states why no image was produced.
     """
-    tool = shutil.which("aptdec")
-    if tool is None:
-        return None
+    from . import apt as apt_mod
     wav = base64.b64decode(feed["audio_b64"])
-    with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, "pass.wav")
-        with open(src, "wb") as fh:
-            fh.write(wav)
-        try:
-            subprocess.run([tool, "-o", image_name, src], cwd=td,
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=300)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        out = os.path.join(td, image_name)
-        if not os.path.exists(out):
-            return None
-        with open(out, "rb") as fh:
-            png = fh.read()
-    if not png.startswith(b"\x89PNG") or len(png) < 200:
-        return None
-    return png
+    try:
+        return apt_mod.decode_wav(wav)
+    except apt_mod.AptError as exc:
+        return None, str(exc)
 
 
 def _lrpt_event(feed, ctx, base, quality):
@@ -619,29 +601,19 @@ def process_satellite(feed, ctx):
                            "pass audio filed as evidence - imagery "
                            "is not classified for this satellite"
                            % quality)
-            elif shutil.which("aptdec") is None:
-                data["imagery"] = None
-                data["imagery_note"] = (
-                    "APT imagery not decoded: aptdec is not staged "
-                    "on this host")
-                content = ("pass captured, signal quality %.2f; "
-                           "pass audio filed as evidence - APT "
-                           "imagery is not decoded: aptdec is not "
-                           "staged on this host" % quality)
             else:
-                png = _apt_png(feed, image_name)
+                png, outcome = _apt_decode(feed)
                 if png is None:
                     data["imagery"] = None
                     data["imagery_note"] = (
-                        "aptdec produced no image from this pass "
-                        "audio")
+                        "APT imagery not decoded: %s" % outcome)
                     content = ("pass captured, signal quality %.2f; "
                                "pass audio filed as evidence - APT "
-                               "imagery is not decoded: aptdec "
-                               "produced no image from this pass"
-                               % quality)
+                               "imagery is not decoded: %s"
+                               % (quality, outcome))
                 else:
                     data["imagery"] = image_name
+                    data["imagery_decode"] = outcome
                     snippets.append({
                         "filename": image_name, "kind": "satellite",
                         "b64": base64.b64encode(png).decode("ascii")})
