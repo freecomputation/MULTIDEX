@@ -17,8 +17,8 @@ import subprocess
 import threading
 import time
 
-from . import budget, displayfeed, gates, orbit, products, retention, \
-    updater, util
+from . import applicability, budget, displayfeed, gates, orbit, \
+    products, retention, updater, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -132,8 +132,27 @@ def satellite_items(profile, start, end, sats):
     return items
 
 
-def build_bill(profile, start, sats):
-    """The watch bill: Class A placed first, gaps filled with B and C."""
+def build_bill(profile, start, sats, stood_down=None):
+    """The watch bill: Class A placed first, gaps filled with B and C.
+
+    Applicability (0.9.0) is decided before the bill exists: a
+    stood-down desk is billed no dwell and draws no grant. The
+    filtering is per desk, never per rotation slot - the marine
+    slot carries both ais and wxradio, and when ais stands down
+    the slot still flies for weather radio with ais removed from
+    its desk list. A rotation entry whose desks all stood down
+    is not picked at all, and a stood-down sonde desk places no
+    Class A windows. Callers who do not pass the stood-down set
+    get it evaluated from the profile, so the plan verb and the
+    muster build the same bill.
+    """
+    if stood_down is None:
+        stood_down = set(applicability.stood_down(
+            applicability.evaluate(profile)))
+    else:
+        stood_down = set(stood_down)
+    live_desks = {name: [d for d in spec[2] if d not in stood_down]
+                  for name, spec in ROTATION.items()}
     end = start + profile["watch"]["hours"] * 3600
     placed = []
     for item in satellite_items(profile, start, end, sats):
@@ -141,11 +160,13 @@ def build_bill(profile, start, sats):
                              p["start"], p["start"] + p["dur"])
                    for p in placed):
             placed.append(item)
-    for item in sonde_items(profile, start, end):
-        if not any(_overlaps(item["start"], item["start"] + item["dur"],
-                             p["start"], p["start"] + p["dur"])
-                   for p in placed):
-            placed.append(item)
+    if "sonde" not in stood_down:
+        for item in sonde_items(profile, start, end):
+            if not any(_overlaps(item["start"],
+                                 item["start"] + item["dur"],
+                                 p["start"], p["start"] + p["dur"])
+                       for p in placed):
+                placed.append(item)
     placed.sort(key=lambda i: i["start"])
 
     rotation = profile["rotation"]
@@ -172,6 +193,8 @@ def build_bill(profile, start, sats):
             if rule == "day" and not 8 <= hour < 20:
                 continue
             if rule == "night" and not (hour >= 20 or hour < 8):
+                continue
+            if not live_desks[name]:
                 continue
             if all(excluded_window(c, bw) for c in centers_of(name)):
                 continue
@@ -210,7 +233,8 @@ def build_bill(profile, start, sats):
                 if name is None:
                     out.append(sweep_item(t, min(300, remaining)))
                 else:
-                    _c, bw, desks, _rule = ROTATION[name]
+                    _c, bw, _d, _rule = ROTATION[name]
+                    desks = live_desks[name]
                     windows = [c for c in centers_of(name)
                                if not excluded_window(c, bw)]
                     center = windows[window_cycle[name] % len(windows)]
@@ -252,6 +276,10 @@ class WatchRunner:
         self.supervisor = Supervisor()
         self.exploit = None
         self.extra_bench = {}
+        # Applicability (0.9.0): the desks this watch's muster
+        # stood down at the home, {desk: reason}. Set at muster,
+        # restored from the watch meta on resume.
+        self.stood_down_desks = {}
         self.source_note = None
         self.interrupts_used = {}
         self.flash_count = 0
@@ -514,7 +542,16 @@ class WatchRunner:
         self._open_display_feed()
         self.exploit = Exploit(self.index, profile)
         self._start_transcription()
-        bill = build_bill(profile, start, sats)
+        # Applicability (0.9.0): judged at muster, before the
+        # bill is built, so a stood-down desk is billed nothing
+        # and granted nothing. The decisions ride the watch meta
+        # and the state file, and the reasons are filed as desk
+        # health events below, beside the bench account.
+        decisions = applicability.evaluate(profile)
+        self.stood_down_desks = applicability.stood_down(decisions)
+        self._applicability_decisions = decisions
+        bill = build_bill(profile, start, sats,
+                          stood_down=set(self.stood_down_desks))
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
         # Reception containment: this watch's allocations are
         # grants against the home's standing allocation ledger,
@@ -559,6 +596,7 @@ class WatchRunner:
             "ended_early": False, "end_reason": None, "resumed": False,
             "generation": self.generation,
             "source_note": source_note,
+            "stood_down": dict(self.stood_down_desks),
             "time_scale": self._scale,
             "reception_pool": pool_after,
             "reception_grants": {
@@ -629,6 +667,31 @@ class WatchRunner:
                             % (name, reason), grade="CONFIRMED",
                     data={"desk": name, "benched": True,
                           "reason": reason}))
+        # The applicability account, filed beside the bench
+        # account and kept distinct from it: stood down at this
+        # home, never benched on this host. An override that held
+        # a desk standing against its test is filed too, so the
+        # muster states when an override decided the outcome.
+        for name in sorted(SPECS):
+            decision = decisions[name]
+            if not decision["stands"]:
+                self._file(make_event(
+                    watch_id, "officer", "desk_health", start, start,
+                    content="desk %s stood down at muster: %s"
+                            % (name, decision["reason"]),
+                    grade="CONFIRMED",
+                    data={"desk": name, "stood_down": True,
+                          "reason": decision["reason"]}))
+            elif decision["by"] == "override":
+                self._file(make_event(
+                    watch_id, "officer", "desk_health", start, start,
+                    content="desk %s stands at muster by profile "
+                            "override: %s"
+                            % (name, decision["reason"]),
+                    grade="CONFIRMED",
+                    data={"desk": name,
+                          "applicability_override": True,
+                          "reason": decision["reason"]}))
         # Update stages the check worker queued while no officer
         # was filing land in the Index now, and a generation the
         # keeper flipped to with no watch standing begins its
@@ -697,6 +760,10 @@ class WatchRunner:
         self.supervisor.set_watch_dir(self.watch_dir)
         self._open_display_feed()
         self.meta = meta
+        # The resumed watch keeps the applicability account its
+        # muster reached: the bill on disk was built under it,
+        # and resume does not re-judge the home.
+        self.stood_down_desks = dict(meta.get("stood_down") or {})
         self.exploit = Exploit(self.index, profile)
         bill = util.read_json(os.path.join(self.watch_dir, "bill.json"),
                               default=[])
@@ -799,6 +866,16 @@ class WatchRunner:
                             % (name, reason), grade="CONFIRMED",
                     data={"desk": name, "benched": True,
                           "reason": reason}))
+        # The muster's applicability account is re-filed with it,
+        # from the watch meta the muster recorded.
+        for name in sorted(self.stood_down_desks):
+            self._file(make_event(
+                watch_id, "officer", "desk_health", resume_t, resume_t,
+                content="desk %s stood down at resume: %s"
+                        % (name, self.stood_down_desks[name]),
+                grade="CONFIRMED",
+                data={"desk": name, "stood_down": True,
+                      "reason": self.stood_down_desks[name]}))
         # Dwells already executed are known by their dwell records:
         # a dwell interrupted mid-flight by the crash has no record
         # boundary confusion - it is re-flown only if it never filed
@@ -1066,6 +1143,7 @@ class WatchRunner:
             "dossiers": len(self.index.dossiers_in_watch(self.watch_id)),
             "flash": self.flash_count,
             "benched": sorted(benched),
+            "stood_down": dict(self.stood_down_desks),
             "complete": False,
             "pid": os.getpid(),
             "heartbeat_s": elapsed,
@@ -2032,6 +2110,7 @@ class WatchRunner:
             "dossiers": len(self.index.dossiers_in_watch(self.watch_id)),
             "flash": self.flash_count,
             "benched": sorted(benched),
+            "stood_down": dict(self.stood_down_desks),
             "complete": True,
             "pid": os.getpid(),
             "heartbeat_s": end - watch_start,

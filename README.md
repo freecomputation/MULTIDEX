@@ -367,7 +367,8 @@ UNRESOLVED.
 One profile file carries every knob: source kind and seed, home
 position and antenna description, watch length, SITREP period, the
 deep-sweep window, the disk ceiling, rotation weights and dwells, the
-desk roster, FLASH triggers, the FLASH chime switch, snippet caps,
+desk roster, the applicability range and overrides, FLASH triggers,
+the FLASH chime switch, snippet caps,
 transcription bounds, radiosonde sites, and an advanced section
 (gain policy, ephemeris file, interrupt cap, rehearsal outages, and
 the time-scale test knob). The shipped `profiles/default.toml` is
@@ -407,6 +408,48 @@ stated, not hidden), disk free space at least the profile ceiling,
 profile valid, home position set. Satellite elements older than
 seven days degrade the watch with a warning; older than thirty,
 the satellite desk benches.
+
+## Applicability
+
+A desk should not fly when its targets provably cannot exist
+within reach of the home. At muster, before the bill is built,
+the officer judges every desk against the home position and
+stands down the ones that provably cannot apply, with the reason
+stated in the muster output, in status, and in doctor. Stood
+down is a state of its own, kept distinct from benched on every
+surface: a benched desk cannot run on this host at all, while a
+stood-down desk cannot run at this home and would stand at
+another. A stood-down desk is billed no dwell and draws no
+allocation grant, and the judgment is per desk, never per
+rotation slot - the marine rotation carries both the AIS desk
+and weather radio, and when AIS stands down the rotation still
+flies for weather radio alone.
+
+Every test fails toward coverage: a desk stands down only when
+the shipped data establishes that its targets cannot be here,
+and any uncertainty resolves toward the desk standing. The
+geographic basis is a coarse land and water grid shipped as
+data in `multidex/geodata.py`, rasterized at a quarter degree
+from Natural Earth's public-domain 1:110m vectors, with its
+provenance, method and conservative rounding stated in that
+module. Two desks carry geographic tests in this build. The AIS
+desk stands down when the nearest water in the grid is farther
+from home than the profile's marine applicability range, 100 km
+by default - a generous outer bound for a VHF service worked
+from a ship's antenna height and a home antenna, with the
+reasoning carried in the shipped profile's comments. The
+weather radio desk stands down when the home is provably
+outside the NOAA Weather Radio service area, drawn in the grid
+as the United States and Canada. Every other desk carries an
+explicit judgment in the applicability table in
+`multidex/applicability.py` rather than an implied one:
+aircraft, satellite and HF desks apply at any home, and the
+radiosonde desk carries no test in this build because no
+launch-site list with the grid's clean public standing could be
+obtained; the module states that plainly, and the desk stands.
+The profile's `[applicability]` section can force any desk to
+stand or to stand down regardless of the tests, and muster
+states when an override decided a desk's outcome.
 
 ## Failure behavior
 

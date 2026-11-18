@@ -4,6 +4,7 @@ version = "0.10.0"
 description = "An autonomous 24-hour signals watch on a single RTL-SDR"
 license = {text = "AGPL-3.0"}
 requires-python = ">=3.11"
+dependencies = ["numpy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
