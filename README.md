@@ -14,11 +14,11 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.6.0.
+Version 0.7.0.
 
 ## The verbs
 
-The whole command surface is seven verbs. No verb prompts for input;
+The whole command surface is eight verbs. No verb prompts for input;
 anything a verb needs comes from the profile or its arguments, and
 anything it cannot get is a refusal with the reason in plain words.
 
@@ -56,6 +56,13 @@ anything it cannot get is a refusal with the reason in plain words.
 - `multidex ask <query>` - query the Index: an emitter identity, a
   frequency such as `121.5 MHz`, a band such as `band uhf`, or a
   service such as `adsb`.
+- `multidex update` - the live update system: `check` runs a
+  fetch-verify-stage cycle now, `status` prints the update
+  account, `approve` activates a staged candidate under the
+  notify-only posture, `reset` clears the failed-activation
+  record, and `rollback` rolls back to the previous generation
+  (at the next safe boundary while a watch stands). See the
+  live updates section below.
 - `multidex doctor` - the muster checks and the full desk inventory
   with tiers, states, and bench reasons, and the dependence
   census: every external program this build invokes, the desk or
@@ -378,6 +385,66 @@ rather than presented as live. Nothing fails silently: every loss
 lands in the Index and in the Watch Report's coverage account and
 desk health chapter.
 
+## Live updates
+
+A standing watch can take a new release without standing down.
+An installation laid out as generations holds immutable release
+trees under `releases/<commit-hash>/`, a clone used only to fetch
+and verify, and a `current` link; a plain single-tree checkout
+keeps working unchanged, and the machinery engages only where
+the layout exists. The `keeper/` program, standalone and outside
+the package, supervises the officer in a generation layout: it
+holds the generation pointer in the home (atomic writes, a
+checksum, a backup copy), starts officers, watches the heartbeat,
+and performs handovers and rollbacks. It does no network, git,
+verification, or device work, and the diff audit refuses any
+release that touches it - the keeper is updated by hand, never
+by a release.
+
+A check fetches only, and identifies the candidate by a signed
+annotated tag carrying a monotonic release counter. The tag
+signature is verified with `git verify-tag` against an
+allowed-signers file stored in the home, never in any repo; with
+no signers file, verification fails closed in every posture.
+The candidate must descend from the running commit, its counter
+must exceed the highest ever recorded, a moved tag or a moved
+remote stops the check, and the diff audit refuses binaries,
+submodule changes, symlinks escaping the tree, unexpected file
+modes, and keeper changes. A verified candidate is materialised
+from its commit hash and re-verified file by file, then must
+pass two gates: a full simulated watch under its own code, and
+a read-proof against copies of the real home proving it arrives
+at the same adoptable summary. A candidate that fails a gate is
+marked bad and never retried. A candidate whose declared
+writable state format exceeds the home's written format is
+blocked in every posture: a format raise is a manual,
+snapshot-first upgrade the operator performs with the watch
+stood down, documented in the manual and deliberately not
+automated.
+
+Activation happens at a dwell boundary under the keeper, never
+beside a satellite pass or inside the guard window before one.
+The old officer snapshots the ledger and index, files the
+handover, closes the tuner, and exits; the new officer adopts
+the watch through the resume machinery and serves probation for
+the first ordinary items. Probation failure restores the
+snapshot, flips back, marks the generation bad, and files the
+episode; three failed activations in 24 hours degrade the
+automatic posture to notify-only until the operator resets it.
+The profile's `[updates]` section carries the posture (the
+shipped default is notify-only), the remote, the check interval,
+the probation length, the pass guard window, and the freeze
+warning days. Every stage files an event in the Index, status
+and doctor carry an update account, and manual chapter 14
+describes the mechanism, the escape hatch (stop the keeper, run
+any retained generation's officer directly, restore the pointer
+from its backup, restore state from a snapshot), and the honest
+limits. One limit is a deployment gate: before the first live
+handover on a new host, measure that the host's tuner closes and
+reopens reliably across officer restarts, because the handover
+depends on that reopening and the system cannot certify it from
+inside.
+
 ## Testing
 
 `python3 -m pytest` runs the suite: Mode S decoding against known
@@ -386,7 +453,13 @@ orbit prediction, scheduler classes and placement rules, Index
 dossier correlation and snippet shedding, anomaly rules, product
 rendering (including the coverage account and a no-em-dash check),
 muster gates, supervisor crash-restart-bench behavior, and an
-end-to-end accelerated watch. The real source is covered by unit
+end-to-end accelerated watch. The live update system is covered
+against local git fixtures with real SSH-signed release tags:
+bad signatures, moved tags, non-fast-forward candidates,
+counter rollback, hostile diffs, both activation gates, the
+format-raise block, officer handovers at and beside pass items,
+pointer corruption recovery, and a keeper end-to-end probation
+rollback. The real source is covered by unit
 tests for its Mode S and AIS demodulators, by feed tests running
 against shim receiver tools, and by a shimmed-real integration
 test: fake `rtl_sdr`, `rtl_fm`, `rtl_power`, `rtl_433`, and

@@ -102,6 +102,9 @@ DEPENDENCES = (
      "transcription - the host faster-whisper stack"),
     ("chronyc", "chronyc", "path",
      "the muster clock gate"),
+    ("git", "git", "path",
+     "the live update system - signed release fetch, "
+     "verification and generation staging"),
     ("pw-play", "pw-play", "path",
      "the FLASH chime"),
     ("paplay", "paplay", "path",
