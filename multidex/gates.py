@@ -154,11 +154,19 @@ def doctor_text(profile, home):
             extra["satellite"] = ("orbital elements %.0f days old, "
                                   "over the 30-day rule" % age)
     benched = bench_reasons(profile, source.kind, capabilities, extra)
+    # Applicability is judged from the same one evaluation the
+    # muster uses, so doctor's account cannot disagree with a
+    # watch's: stood down at this home is a state of its own,
+    # distinct from benched on this host.
+    from . import applicability as _applicability
+    decisions = _applicability.evaluate(profile)
     lines.append("Desk inventory (tier, state, reason):")
     for name in sorted(SPECS):
         tier, service, _cpu, _ch = SPECS[name]
         if name in benched:
             state, reason = "benched", benched[name]
+        elif not decisions[name]["stands"]:
+            state, reason = "stood down", decisions[name]["reason"]
         else:
             state, reason = "standing", None
         line = "- %s (tier %d, %s): %s" % (name, tier, service, state)

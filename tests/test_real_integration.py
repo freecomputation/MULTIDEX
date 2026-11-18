@@ -43,6 +43,13 @@ def _profile_file(tmp_path):
     text = text.replace("sitrep_hours = 6", "sitrep_hours = 1")
     text = text.replace("disk_ceiling_gb = 20", "disk_ceiling_gb = 0.05")
     text = text.replace("time_scale = 1.0", "time_scale = 100000.0")
+    # A synthetic coastal home: at the shipped inland reference
+    # position the AIS desk stands down at muster under 0.9.0
+    # applicability, and this test needs every fed desk flying,
+    # the AIS fixture included. The stand-down itself is covered
+    # in test_fixes_090.py.
+    text = text.replace("lat = 39.0", "lat = 29.9")
+    text = text.replace("lon = -98.0", "lon = -90.0")
     path = tmp_path / "real.toml"
     path.write_text(text)
     shutil.copyfile(os.path.join(ROOT, "profiles", "tle.txt"),

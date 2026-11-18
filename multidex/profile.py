@@ -51,6 +51,11 @@ DEFAULTS = {
                   "amateur", "iss", "vdl2", "digitalvoice"],
         "bench": [],
     },
+    "applicability": {
+        "marine_range_km": 100,
+        "force_stand": [],
+        "force_stand_down": [],
+    },
     "flash": {
         "threshold_grade": "PROBABLE",
         "watch_emitters": [],
@@ -170,6 +175,34 @@ def _hard_problems(profile):
                 if name not in _DESKS:
                     hard.append("desks %s names %r, which is not a "
                                 "known desk" % (section, name))
+    applicability = profile.get("applicability", {})
+    if applicability is not None and not isinstance(applicability,
+                                                    dict):
+        hard.append("applicability section is not a table")
+    elif isinstance(applicability, dict):
+        rng = applicability.get("marine_range_km")
+        if rng is not None and (not _is_number(rng) or rng <= 0):
+            hard.append("applicability marine_range_km must be a "
+                        "positive number of kilometres")
+        forced = {}
+        for section in ("force_stand", "force_stand_down"):
+            names = applicability.get(section, [])
+            if not isinstance(names, list):
+                hard.append("applicability %s is not a list of "
+                            "desk names" % section)
+                continue
+            for name in names:
+                if name not in _DESKS:
+                    hard.append("applicability %s names %r, which "
+                                "is not a known desk" % (section,
+                                                         name))
+                elif name in forced:
+                    hard.append("applicability names %r in both "
+                                "force_stand and force_stand_down; "
+                                "an override cannot decide both ways"
+                                % (name,))
+                else:
+                    forced[name] = section
     transcription = profile.get("transcription", {})
     if isinstance(transcription, dict):
         for name in transcription.get("desks", []) or []:
