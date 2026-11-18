@@ -8,4 +8,4 @@ finished products: FLASH alerts, SITREPs, and the Watch Report.
 Standard library only. Receive only. Local only.
 """
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"

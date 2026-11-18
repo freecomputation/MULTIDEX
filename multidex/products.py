@@ -302,6 +302,13 @@ def render_report(index, watch_id):
         if desk:
             L.append("While %s was benched, %s." % (desk, CONSEQUENCE.get(
                 desk, "that service is unreported")))
+    stood_reasons = {e["data"].get("desk"): e["data"].get("reason")
+                     for e in health if e["data"].get("stood_down")}
+    for desk in sorted(stood_reasons):
+        if desk:
+            L.append("The %s desk stood down at this home: %s. "
+                     "This watch cannot speak to that service here."
+                     % (desk, stood_reasons[desk]))
     L.append("Antenna for this watch: %s." % meta.get("antenna",
                                                       "not recorded"))
     if meta.get("source") == "real" and "hfdl" not in benched:
@@ -492,7 +499,8 @@ def render_report(index, watch_id):
             L.append("- %s %s" % (util.fmt_stamp(ev["t_start"]),
                                   ev["content"]))
     else:
-        L.append("No desk failed, crashed, or was benched this watch.")
+        L.append("No desk failed, crashed, was benched or stood "
+                 "down this watch.")
     L.append("")
     L.append("## 9. Statistics appendix")
     L.append("Events by desk:")
@@ -748,6 +756,12 @@ def status_text(home):
                        if health else "all standing desks healthy"),
         "Source: %s" % meta.get("source", "unknown"),
     ]
+    # Stood-down desks are a separate account from benched desks
+    # and are stated separately, with their reasons: benched
+    # cannot run on this host, stood down cannot run at this home.
+    stood = state.get("stood_down") or {}
+    for name in sorted(stood):
+        lines.append("Stood down: %s - %s" % (name, stood[name]))
     if meta.get("source_note"):
         lines.append("Source note: %s" % meta["source_note"])
     bstate = state.get("budget")

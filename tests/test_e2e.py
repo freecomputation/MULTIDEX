@@ -24,6 +24,13 @@ def _run_watch(home, profile, hours=2):
 
 
 def test_accelerated_watch_produces_products(home, profile):
+    # A synthetic coastal home: on the shipped inland reference
+    # position the AIS desk stands down at muster under 0.9.0
+    # applicability, and this test wants the full desk spread
+    # flying. The stand-down itself is covered in
+    # test_fixes_090.py.
+    profile["home"]["lat"] = 29.9
+    profile["home"]["lon"] = -90.0
     watch_id = _run_watch(home, profile)
     wdir = os.path.join(home, "watches", watch_id)
     assert os.path.exists(os.path.join(wdir, "REPORT.md"))

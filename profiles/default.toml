@@ -77,6 +77,27 @@ stand = ["adsb", "airband", "milair", "acars", "ais", "wxradio", "ism",
 # Desks to bench even though they could stand.
 bench = []
 
+[applicability]
+# Applicability (0.9.0): at muster the officer judges every desk
+# against the home position and stands down the desks whose targets
+# provably cannot exist within reach of the home, with the reason
+# stated in the muster output, in status and in doctor. A stood-down
+# desk is not benched: it cannot run at this home and would stand at
+# another. Every test fails toward coverage - a desk stands down
+# only when the shipped land and water grid establishes that its
+# targets cannot be here.
+# Ship AIS is a VHF service. From a ship's antenna tens of metres
+# up and a home antenna, the radio horizon is a few tens of
+# kilometres in the best conditions; 100 km is a generous outer
+# bound that keeps every plausibly reachable waterway in coverage.
+# The marine desk stands down only when the nearest water in the
+# grid is farther than this.
+marine_range_km = 100
+# Operator overrides, either way, regardless of the tests. Muster
+# states when an override decided a desk's outcome.
+force_stand = []
+force_stand_down = []
+
 [alerts]
 # A two-tone chime sounds on the host when a FLASH is written, so an
 # alert is audible in the room as well as filed. The chime never
