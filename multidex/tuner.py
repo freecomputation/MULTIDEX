@@ -371,14 +371,14 @@ class RealSource:
         n = len(raw) // 2
         return list(struct.unpack("<%dh" % n, raw[:2 * n]))
 
-    def _iq(self, center_hz, rate, nsamp, seconds=40):
+    def _iq(self, center_hz, rate, nsamp, seconds=40, gain="23"):
         with tempfile.NamedTemporaryFile(suffix=".iq",
                                          delete=False) as fh:
             path = fh.name
         try:
             size = _stream_to_file(
                 ["rtl_sdr", "-f", str(int(center_hz)), "-s", str(rate),
-                 "-n", str(nsamp), "-g", "23", path], path, seconds)
+                 "-n", str(nsamp), "-g", gain, path], path, seconds)
             if size == 0:
                 raise TunerLost("rtl_sdr produced no samples")
             with open(path, "rb") as fh:
@@ -464,7 +464,15 @@ class RealSource:
         return self.scan(center_hz, bw_hz, t0, t1)
 
     def _feed_adsb(self, vfos, center_hz, bw_hz, t0, t1):
-        raw = self._iq(1090e6, 2000000, 2000000, seconds=40)
+        # ADS-B is a weak-signal pulse service: at the house gain of
+        # 23 a rural indoor antenna reads the 1090 MHz band at the
+        # idle floor, while maximum gain decodes airliners cleanly
+        # (field-proven 2026-11-17: 31 CRC-valid frames in 30 s at
+        # gain 49.6 against silence at 23). Capture ten seconds at
+        # maximum gain so a dwell hears whole even/odd CPR pairs,
+        # not a one-second slice.
+        raw = self._iq(1090e6, 2000000, 20000000, seconds=60,
+                       gain="49.6")
         return {"frames": demod_modes(raw)}
 
     def _feed_airband(self, vfos, center_hz, bw_hz, t0, t1):
