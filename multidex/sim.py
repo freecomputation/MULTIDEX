@@ -16,7 +16,7 @@ import math
 import random
 
 from . import codecs, modes, orbit
-from .desks import AIRBAND_CHANNELS
+from .desks import AIRBAND_CHANNELS, MILAIR_CHANNELS
 
 PAGER_FREQ = 929.6125e6
 WX_FREQ = 162.475e6
@@ -297,9 +297,10 @@ class SimSource:
         return True, "simulated source (no hardware required)"
 
     def capabilities(self):
-        return {"adsb", "airband", "acars", "ais", "wxradio", "ism",
-                "aprs", "pager", "sweep", "satellite", "sonde",
-                "cellular", "trunking", "broadcast"}
+        return {"adsb", "airband", "milair", "acars", "ais", "wxradio",
+                "ism", "aprs", "pager", "sweep", "satellite", "sonde",
+                "cellular", "trunking", "broadcast", "audiocensus",
+                "amateur", "iss", "vdl2", "digitalvoice"}
 
     # -------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -384,6 +385,9 @@ class SimSource:
             desk = vfo["desk"]
             if desk == "sweep":
                 feeds["sweep"] = self.scan(center_hz, bw_hz, t0, t1)
+            elif desk == "audiocensus":
+                feeds["audiocensus"] = self._audiocensus_feed(
+                    center_hz, bw_hz, t0, t1)
             elif desk == "adsb":
                 feeds["adsb"] = {"frames": self._adsb_frames(t0, t1)}
             elif desk == "acars":
@@ -391,6 +395,9 @@ class SimSource:
             elif desk == "airband":
                 feeds["airband"] = {"segments":
                                     self._airband_segments(t0, t1, vfo)}
+            elif desk == "milair":
+                feeds["milair"] = {"segments": self._airband_segments(
+                    t0, t1, vfo, MILAIR_CHANNELS)}
             elif desk == "ais":
                 feeds["ais"] = {"sentences": self._ais_sentences(t0, t1)}
             elif desk == "wxradio":
@@ -403,6 +410,16 @@ class SimSource:
                 feeds["pager"] = {"batches": self._pager_batches(t0, t1)}
             elif desk == "satellite":
                 feeds["satellite"] = self._satellite_feed(vfo)
+            elif desk == "amateur":
+                feeds["amateur"] = self._amateur_feed(center_hz,
+                                                      t0, t1)
+            elif desk == "iss":
+                feeds["iss"] = self._iss_feed(vfo, t0, t1)
+            elif desk == "vdl2":
+                feeds["vdl2"] = self._vdl2_feed(t0, t1)
+            elif desk == "digitalvoice":
+                feeds["digitalvoice"] = self._digitalvoice_feed(
+                    center_hz, t0, t1)
             elif desk == "sonde":
                 feeds["sonde"] = {"frames": self._sonde_frames(t0, t1)}
             elif desk == "cellular":
@@ -436,13 +453,27 @@ class SimSource:
     def _acars_messages(self, t0, t1):
         w = self.world
         out = []
+        in_range = []
         for ac in w.aircraft:
             rng = _rng(w.seed, ac["icao"], int(t0 // 1500))
-            if rng.random() < 0.55:
-                continue
             pos = w._aircraft_pos(ac, (t0 + t1) / 2)
             if pos is None or pos[2] > 280:
                 continue
+            in_range.append((ac, rng, pos))
+            if rng.random() < 0.55:
+                continue
+            text = rng.choice(_ACARS_TEXTS).format(
+                eta="%02d%02d" % (rng.randrange(24), rng.randrange(60)),
+                fuel="%d KG" % rng.randrange(3000, 19000),
+                lat="%.2f" % pos[0], lon="%.2f" % pos[1])
+            out.append(codecs.acars_build(
+                ac["tail"], ac["flight"],
+                rng.choice(["Q0", "H1", "5R", "A9"]), text))
+        if not out and in_range:
+            # A full dwell on the datalink channel with traffic in
+            # range hears the channel work: the per-aircraft skip
+            # models density, not a silent channel under traffic.
+            ac, rng, pos = in_range[0]
             text = rng.choice(_ACARS_TEXTS).format(
                 eta="%02d%02d" % (rng.randrange(24), rng.randrange(60)),
                 fuel="%d KG" % rng.randrange(3000, 19000),
@@ -452,12 +483,13 @@ class SimSource:
                 rng.choice(["Q0", "H1", "5R", "A9"]), text))
         return out
 
-    def _airband_segments(self, t0, t1, vfo):
+    def _airband_segments(self, t0, t1, vfo, channels=None):
         w = self.world
         rng = _rng(w.seed, int(t0), int(vfo["freq_hz"]))
         segments = []
         dur = t1 - t0
-        for ch in AIRBAND_CHANNELS:
+        for ch in (channels if channels is not None
+                   else AIRBAND_CHANNELS):
             if abs(ch - vfo["freq_hz"]) > vfo["bw_hz"] / 2:
                 continue
             if ch == 121.5e6:
@@ -495,6 +527,86 @@ class SimSource:
                     v["mmsi"], v["name"], v["callsign"],
                     destination="RIVERPORT"))
         return out
+
+    def _audiocensus_feed(self, center_hz, bw_hz, t0, t1):
+        """Synthesize the window's IQ and run the real census
+        engine over it: the simulated world carries voice-shaped
+        AM, FM and SSB emissions, music, an FSK data signal and
+        plain noise windows, on the same terms as the RF world."""
+        import numpy as np
+        from . import audiocensus
+        fs = 240000.0
+        seconds = 2.5
+        n = int(fs * seconds)
+        rng = _rng(self.world.seed, int(center_hz), int(t0 // 600))
+        t = np.arange(n) / fs
+        iq = (np.random.default_rng(int(rng.random() * 1e9))
+              .normal(0, 0.02, n)
+              + 1j * np.random.default_rng(int(rng.random() * 1e9) + 1)
+              .normal(0, 0.02, n)).astype(np.complex128)
+        if rng.random() < 0.75:
+            kinds = rng.sample(["am_voice", "fm_voice", "ssb_voice",
+                                "fm_music", "fsk_data", "carrier"],
+                               k=rng.randrange(1, 3))
+            for kind in kinds:
+                off = rng.uniform(-bw_hz / 2 * 0.7, bw_hz / 2 * 0.7)
+                amp = 0.35
+                ar = 16000.0
+                at = np.arange(int(ar * seconds)) / ar
+                # Syllabic envelope: bursts with pauses.
+                env = np.zeros_like(at)
+                pos = 0.1
+                while pos < seconds - 0.3:
+                    dur = rng.uniform(0.25, 0.7)
+                    i0, i1 = int(pos * ar), int((pos + dur) * ar)
+                    env[i0:i1] = 1.0
+                    pos += dur + rng.uniform(0.15, 0.6)
+                pitch = rng.uniform(105, 165)
+                audio = np.zeros_like(at)
+                for h in range(1, 14):
+                    f = pitch * h
+                    if f > 3400:
+                        break
+                    form = math.exp(-((f - 800) ** 2) / (2 * 500 ** 2)) \
+                        + 0.6 * math.exp(-((f - 2200) ** 2)
+                                         / (2 * 600 ** 2))
+                    audio += form / h * np.sin(
+                        2 * np.pi * f * at + rng.uniform(0, 6.28))
+                audio = audio * env
+                audio /= (np.max(np.abs(audio)) + 1e-9)
+                up = np.interp(t, at, audio)
+                if kind == "am_voice":
+                    sig = (1.0 + 0.85 * up) * np.exp(2j * np.pi * off * t)
+                elif kind in ("fm_voice", "fm_music"):
+                    if kind == "fm_music":
+                        chord = sum(np.sin(2 * np.pi * f * at)
+                                    for f in (261.6, 329.6, 392.0))
+                        up = np.interp(t, at, chord / 3.0)
+                        dev = 40000.0
+                    else:
+                        dev = 5000.0
+                    phase = 2 * np.pi * np.cumsum(up) / fs * dev
+                    sig = np.exp(1j * (2 * np.pi * off * t + phase))
+                elif kind == "ssb_voice":
+                    spec = np.fft.fft(up)
+                    freqs = np.fft.fftfreq(len(up), 1 / fs)
+                    spec = np.where(freqs < 0, 0.0, spec)
+                    analytic = np.fft.ifft(spec) * 2
+                    sig = analytic * np.exp(2j * np.pi * off * t)
+                elif kind == "fsk_data":
+                    tones = np.where((t * 8).astype(int) % 2 == 0,
+                                     1200.0, 2200.0)
+                    phase = 2 * np.pi * np.cumsum(tones) / fs
+                    sig = 0.8 * np.exp(1j * (2 * np.pi * off * t + phase))
+                else:  # carrier
+                    sig = np.exp(2j * np.pi * off * t)
+                iq = iq + amp * sig
+        result = audiocensus.analyze(iq, fs, center_hz,
+                                     extract_cap=6)
+        for cand in result["candidates"]:
+            if cand.get("audio"):
+                cand["audio"] = cand["audio"][:16000 * 6]
+        return result
 
     def _wx_feed(self, t0, t1):
         w = self.world
@@ -565,6 +677,99 @@ class SimSource:
                                  (max_elev - 8) / 60.0)), 2),
                 "max_elev_deg": max_elev, "sat": p.get("sat"),
                 "norad": p.get("norad")}
+
+    def _amateur_feed(self, center_hz, t0, t1):
+        """CW by genuine round-trip: the message is encoded to IQ
+        and recovered by the production detector. FT8 entries are
+        modelled decodes, as the sim models the jt9 program's
+        output the way it models other decoders'."""
+        import numpy as np
+        from . import cw as cw_mod
+        rng = _rng(self.world.seed, int(center_hz), int(t0 // 900))
+        feed = {"cw": [], "ft8": []}
+        if rng.random() < 0.7:
+            call = rng.choice(["W1ABC", "K4XYZ", "N0CALL", "DL2AB"])
+            msg = "CQ CQ DE %s %s K" % (call, call)
+            base = 7030000.0 if center_hz < 10e6 else 14030000.0
+            iq = cw_mod.encode_iq(msg, wpm=17, fs=48000.0,
+                                  offset_hz=2500.0)
+            noise = (np.random.default_rng(rng.randrange(1 << 30))
+                     .normal(0, 0.03, len(iq))
+                     + 1j * np.random.default_rng(
+                         rng.randrange(1 << 30))
+                     .normal(0, 0.03, len(iq)))
+            for sig in cw_mod.detect(iq + 0.5 * noise, 48000.0):
+                sig = dict(sig)
+                sig["freq_hz"] = base + sig.pop("freq_offset_hz")
+                feed["cw"].append(sig)
+        if rng.random() < 0.5:
+            feed["ft8"].append({
+                "freq_hz": (7074000.0 if center_hz < 10e6
+                            else 14074000.0) + rng.randrange(400, 2400),
+                "snr_db": rng.randrange(-18, 4),
+                "dt_s": round(rng.uniform(-0.8, 0.8), 1),
+                "text": rng.choice([
+                    "CQ W1ABC FN42", "K4XYZ N0CALL -07",
+                    "N0CALL DL2AB R-12", "CQ DL2AB JO62"])})
+        return feed
+
+    def _iss_feed(self, vfo, t0, t1):
+        p = vfo.get("pass") or {}
+        rng = _rng(self.world.seed, int(t0 // 600), 145800000)
+        feed = {"attempted": True, "segments": [], "sstv": None}
+        if p.get("max_elev_deg", 0) < 15:
+            return feed
+        roll = rng.random()
+        if roll < 0.35:
+            feed["segments"].append({
+                "offset_s": rng.uniform(30, 200),
+                "dur_s": rng.uniform(4, 12),
+                "snr_db": rng.uniform(15, 30)})
+        elif roll < 0.55:
+            import base64 as _b64
+            import numpy as np
+            from . import sstv as sstv_mod
+            img = np.zeros((240, 320, 3), dtype=np.uint8)
+            img[:, :, 0] = np.linspace(0, 255, 320).astype(np.uint8)
+            img[:, :, 1] = np.linspace(255, 0, 240).astype(
+                np.uint8)[:, None]
+            img[100:140, 100:220, 2] = 255
+            audio = sstv_mod.encode_audio(img, "Robot 36", 12000)
+            dec = sstv_mod.decode_audio(audio, 12000)
+            if dec:
+                feed["sstv"] = {"mode": dec["mode"],
+                                "lines": dec["lines"],
+                                "height": dec["height"],
+                                "png_b64": _b64.b64encode(
+                                    dec["png"]).decode("ascii")}
+        return feed
+
+    def _vdl2_feed(self, t0, t1):
+        rng = _rng(self.world.seed, int(t0 // 900), 136975000)
+        feed = {"messages": [], "bursts": []}
+        if rng.random() < 0.6:
+            tail = rng.choice(["N12345", "N67890", "N24680"])
+            feed["messages"].append({
+                "tail": tail,
+                "text": "VDL2 ACARS label H1 from %s" % tail,
+                "raw": "simulated vdl2 frame"})
+        elif rng.random() < 0.5:
+            feed["bursts"].append({"count": rng.randrange(2, 9)})
+        return feed
+
+    def _digitalvoice_feed(self, center_hz, t0, t1):
+        rng = _rng(self.world.seed, int(center_hz), int(t0 // 900))
+        feed = {"calls": []}
+        if rng.random() < 0.6:
+            feed["calls"].append({
+                "protocol": rng.choice(["DMR", "P25", "NXDN"]),
+                "system": "SYS:SIM-%d" % rng.randrange(100, 999),
+                "talkgroup": str(rng.randrange(1, 500)),
+                "source": str(rng.randrange(100000, 999999)),
+                "slot": rng.choice([1, 2]),
+                "encrypted": rng.random() < 0.3,
+                "freq_hz": center_hz})
+        return feed
 
     def _sonde_frames(self, t0, t1):
         w = self.world

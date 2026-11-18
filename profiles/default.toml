@@ -51,8 +51,9 @@ disk_ceiling_gb = 20
 # Class B standing rotation: weight (share of the day) and dwell
 # length in seconds for each entry. The Watch Officer re-weights HF
 # entries by the hour; propagation is not flat and neither is the bill.
-adsb     = { weight = 10, dwell_s = 150 }
-airband  = { weight = 9,  dwell_s = 600 }
+adsb     = { weight = 16, dwell_s = 120 }
+airband  = { weight = 20, dwell_s = 120 }
+milair   = { weight = 10, dwell_s = 90 }
 datalink = { weight = 6,  dwell_s = 300 }
 marine   = { weight = 6,  dwell_s = 300 }
 aprs     = { weight = 4,  dwell_s = 240 }
@@ -69,9 +70,10 @@ hf_night = { weight = 4,  dwell_s = 300 }
 # Desks that stand the watch. Desks absent from this list are benched
 # for the watch. Benched-with-reason desks (design section 7, Tier 2
 # integrations owed) bench themselves regardless; doctor lists them.
-stand = ["adsb", "airband", "acars", "ais", "wxradio", "ism", "aprs",
-         "pager", "sweep", "satellite", "sonde", "cellular",
-         "trunking", "broadcast"]
+stand = ["adsb", "airband", "milair", "acars", "ais", "wxradio", "ism",
+         "aprs", "pager", "sweep", "satellite", "sonde", "cellular",
+         "trunking", "broadcast", "audiocensus", "amateur", "iss",
+         "vdl2", "digitalvoice"]
 # Desks to bench even though they could stand.
 bench = []
 

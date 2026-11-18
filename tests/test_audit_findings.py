@@ -191,7 +191,7 @@ def test_audit_sitrep_hours_zero_watch_hangs(tmp_path):
 
 def test_audit_rotation_scalar_is_profile_error(tmp_path):
     text = open(os.path.join(BUILD, "profiles", "default.toml")).read()
-    text = text.replace("adsb     = { weight = 10, dwell_s = 150 }",
+    text = text.replace("adsb     = { weight = 16, dwell_s = 120 }",
                         "adsb = 10")
     path = tmp_path / "bad.toml"
     path.write_text(text)
@@ -222,22 +222,23 @@ def test_audit_time_scale_string_refused(profile):
 def test_audit_state_benched_includes_capability_benches(home, profile,
                                                          index):
     """state.json's benched list must carry every desk the officer
-    itself considers benched, including capability benches such as
-    acars on the real source; status prints 'all standing desks
-    healthy' when the list is empty."""
+    itself considers benched, including build benches such as hfdl
+    (0.2.0: hfdl is the always-benched desk; in 0.1.x this test used
+    acars, which stood up in 0.2.0); status prints 'all standing
+    desks healthy' when the list is empty."""
     runner = WatchRunner(home, profile, index)
     runner.watch_id = "watch-state"
     runner.watch_dir = index.watch_dir("watch-state")
     src = RealSource(profile)
-    reason = runner._desk_benched_reason("acars", src)
-    assert reason is not None, "sanity: acars must bench on real"
+    reason = runner._desk_benched_reason("hfdl", src)
+    assert reason is not None, "sanity: hfdl must bench on real"
     item = {"start": T0, "dur": 150, "label": "Rotation adsb",
             "desks": ["adsb"]}
     runner._save_state(1, item, T0)
     state = json.load(open(os.path.join(runner.watch_dir,
                                         "state.json")))
-    assert "acars" in state["benched"], (
-        "officer benches acars (%r) but state.json benched=%r, so "
+    assert "hfdl" in state["benched"], (
+        "officer benches hfdl (%r) but state.json benched=%r, so "
         "status reports all desks healthy" % (reason, state["benched"]))
 
 

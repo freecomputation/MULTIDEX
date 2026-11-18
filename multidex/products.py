@@ -13,7 +13,7 @@ import time
 
 from . import util
 from .bands import BANDS, band_name
-from .desks import SPECS, TRANSCRIPTION_REASON
+from .desks import SPECS, TRANSCRIPTION_REASON, transcription_state
 from .exploit import GRADE_ORDER, day_picture
 
 CONSEQUENCE = {
@@ -342,11 +342,34 @@ def render_report(index, watch_id):
     L.append("")
     L.append("## 7. Transcript highlights")
     voice = index.count_events(watch_id=watch_id, kind="voice")
-    L.append("Voice transmissions heard: %d. Transcription state: %s. "
-             "No transcript is quoted in this report, because none was "
-             "produced; voice evidence is filed as audio snippets "
-             "under the snippet accounting in the appendix."
-             % (voice, TRANSCRIPTION_REASON))
+    transcripts = [ev for ev in index.events(
+        watch_id=watch_id, desk="audiocensus", kinds=("decode",))
+        if (ev.get("data") or {}).get("machine_transcript")]
+    if transcripts:
+        L.append("Voice transmissions heard: %d. Machine "
+                 "transcripts produced: %d, from grade-A census "
+                 "snippets inside the bounded transcription "
+                 "budget. They are unverified machine transcripts "
+                 "and inherit their snippet's grade."
+                 % (voice, len(transcripts)))
+        for ev in transcripts[:3]:
+            L.append("- %s: \"%s\""
+                     % (ev.get("emitter") or "unknown audio",
+                        (ev["data"].get("transcript") or "")[:240]))
+    else:
+        _tstate, _treason = transcription_state()
+        if _tstate == "bound":
+            detail = ("the engine is bound, but no snippet "
+                      "passed the grade-A triage gate inside "
+                      "the budget this watch")
+        else:
+            detail = _treason
+        L.append("Voice transmissions heard: %d. Transcription "
+                 "state: %s. No transcript is quoted in this "
+                 "report, because none was produced; voice "
+                 "evidence is filed as audio snippets under the "
+                 "snippet accounting in the appendix."
+                 % (voice, detail))
     L.append("")
     L.append("## 8. Desk health and failure account")
     if health:

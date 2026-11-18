@@ -2,10 +2,6 @@
 
 Status: design, written 2026-11-17. No code exists. Nothing has been pushed to the repo beyond what the operator placed there. Build begins only on the operator's word.
 
-License: AGPL-3.0, the Free Computation standard.
-
-Repo: https://github.com/freecomputation/MULTIDEX
-
 ## 1. Purpose
 
 MULTIDEX is an autonomous signals watch system built on a single RTL-SDR. The operator issues one small command and the system does the rest: it plans a 24-hour watch, schedules the one tuner across everything that tuner can reach, collects, decodes, classifies, correlates, and disseminates finished products, all without further human direction. The operator may configure the watch in advance through a profile. Configuration is an option, never a requirement - the shipped defaults are sane, complete, and sufficient for a full watch on the day the system is first run.
@@ -227,3 +223,57 @@ These are the operator's to settle, at founding or after. Until he does, the def
 - Product rendering: plain markdown files by default. A rendered reading page in the Coffer manner is a later refinement, not a founding need.
 
 Build begins only on the operator's word.
+
+## 18. The 0.2.0 build record
+
+What 0.2.0 stood up, and what still stands benched, stated as
+built. The full research record lives with the build.
+
+- Airband repaired. The 0.1.x channel list held no local sector
+  frequency and its single window dropped four of six channels
+  on every dwell. The desk now serves the verified local set
+  (sectors 121.1, 125.4, 133.45, 133.75 MHz; tower 135.2;
+  clearance 118.075; operations 126.2; guard 121.5), rotation
+  slots carry a cycle of window centres so every channel falls
+  inside a captured window, and a UHF military airband desk
+  serves the paired channels and 243.0 MHz guard. Aircraft
+  dwells are minutes apart in the median, the deep-sweep block
+  excepted by design.
+- A universal audio emissions census rides every captured
+  window: detection over the window spectrum, per-candidate
+  extraction, modulation classification, demodulation, snippet
+  filing, and a voice-likelihood grade from hard gates plus a
+  rubric the negative controls (static, squelch bursts, music,
+  data) cannot pass. Unknown audio is reported as unknown
+  audio, with its evidence. Data emissions are filed as data.
+- ACARS decodes on the real source in pure Python (MSK
+  demodulation, ARINC 618 assembly, parity and CRC gates).
+- The amateur desk decodes CW in pure Python and binds FT8 to
+  the host's jt9 program when present. The ISS desk flies
+  downlink passes: voice filed, SSTV (Robot 36, PD120, Martin
+  M1/M2) decoded in pure Python, silent passes reported as
+  silent.
+- VDL2 binds the host's dumpvdl2 when present and runs a burst
+  census that claims no frames when it is not. Digital voice
+  is a signalling metadata desk via DSD-FME: intelligible
+  voice needs an AMBE-family vocoder this build does not
+  carry, and its products say so.
+- Transcription is a bounded triage over grade-A census
+  snippets on the host's faster-whisper stack: gated, budgeted
+  at 90 CPU-minutes a watch, rate-capped, fully accounted.
+  Simulated watches never transcribe.
+- HFDL remains benched, with its blockers stated in the desk
+  inventory: the decoder chain has no user-space staging route
+  on the watch host, its channels need a propagation-driven
+  band rotation this build does not carry, and the fixed
+  antenna is a VHF/UHF antenna.
+- The signal-processing desks (census, ACARS, CW, SSTV) use
+  numpy, present on the watch host. The rest of the system is
+  standard library only; a host without numpy files those
+  desks' capture failures as gaps with the import error stated,
+  and the watch stands.
+
+License: AGPL-3.0, the Free Computation standard.
+
+Repo: https://github.com/freecomputation/MULTIDEX
+

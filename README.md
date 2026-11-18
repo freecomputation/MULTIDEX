@@ -8,10 +8,13 @@ products: FLASH alerts as warranted, a SITREP every six hours, and a
 flagship Watch Report at stand-down with a full coverage account.
 
 MULTIDEX receives only. It never transmits, never injects, and never
-touches a network. It is built entirely on the Python 3 standard
-library (Python 3.11 or later) and runs on modest hardware.
+touches a network. The system core is the Python 3 standard library
+(Python 3.11 or later); the signal-processing desks added in 0.2.0
+(the audio census, ACARS, CW and SSTV) also use numpy, present on
+the reference host, and file their absence as stated capture gaps
+where it is missing. It runs on modest hardware.
 
-Version 0.1.2.
+Version 0.2.0.
 
 ## The verbs
 

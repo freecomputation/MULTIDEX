@@ -99,7 +99,7 @@ def test_real_source_feeds_the_desks(profile, shim_path):
                  "aprs", "sonde", "broadcast", "cellular", "trunking",
                  "satellite", "sweep"):
         assert desk in caps, desk
-    assert "acars" not in caps
+    assert "acars" in caps and "milair" in caps
 
     # ADS-B: genuine Mode S frames out of the 1090 MHz capture.
     feeds = source.capture(1090e6, 2.4e6, T0, T0 + 150,
@@ -203,8 +203,10 @@ def test_real_source_feeds_the_desks(profile, shim_path):
 
 def test_real_bench_reasons_are_specific(profile):
     caps = {"sweep", "adsb", "ais"}
-    state, reason = desks.desk_state("acars", profile, "real", caps)
-    assert state == "benched" and "acarsdec" in reason
+    # 0.2.0: the conditional tool bench is the specific-reason case
+    # (in 0.1.x this used acars, which stood up in pure Python).
+    state, reason = desks.desk_state("vdl2", profile, "real", caps)
+    assert state == "benched" and "dumpvdl2" in reason
     state, _ = desks.desk_state("adsb", profile, "real", caps)
     assert state == "standing"
     state, reason = desks.desk_state("ais", profile, "real", {"sweep"})
