@@ -122,6 +122,37 @@ sites = [
 ]
 synoptic_hours = [0, 12]
 
+[updates]
+# Live updates (0.7.0). The system fetches signed releases from its
+# own git remote, verifies them against the allowed-signers file in
+# the home, stages them as a new generation beside the running one,
+# and activates them at a dwell boundary under the keeper - a
+# standing watch never ends for an update. This engages only in a
+# generation-layout install (see the README's live update section);
+# a plain single-tree checkout runs exactly as before.
+# Posture gates activation only, never verification: "automatic"
+# activates a verified, gate-passed release on its own;
+# "notify-only" stages it and waits for `multidex update approve`;
+# "off" verifies and stages nothing activates.
+posture = "notify-only"
+# The git remote in the install's repo clone to fetch releases from.
+remote = "origin"
+# The expected URL of that remote. Empty pins the URL seen at the
+# first successful check into the home's update state; a remote
+# that later answers at a different URL is a stop condition.
+remote_url = ""
+# How often the standing watch checks for a release, in hours.
+check_interval_hours = 6
+# Ordinary bill items a new generation must complete under
+# probation before it is marked successful.
+probation_items = 3
+# No handover or rollback is flown when the next bill item is a
+# satellite pass, or within this many minutes before one.
+pass_guard_minutes = 30
+# Doctor and status warn when no check of the remote has completed
+# inside this many days: a silently frozen channel is a failure.
+freeze_warning_days = 14
+
 [advanced]
 # Per-desk tuner gain in dB. A setting that serves airband starves HF;
 # each desk carries its own. 23 dB is the house finding for the site.

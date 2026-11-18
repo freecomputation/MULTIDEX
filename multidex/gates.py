@@ -239,4 +239,6 @@ def doctor_text(profile, home):
     except Exception as exc:
         lines.append("Reception pool: could not be read "
                      "(%s: %s)" % (type(exc).__name__, exc))
+    from . import updater as _updater
+    lines.extend(_updater.doctor_lines(home, profile))
     return "\n".join(lines)

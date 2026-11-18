@@ -58,6 +58,15 @@ DEFAULTS = {
         "guard_hz": 121500000,
     },
     "alerts": {"chime": True},
+    "updates": {
+        "posture": "notify-only",
+        "remote": "origin",
+        "remote_url": "",
+        "check_interval_hours": 6,
+        "probation_items": 3,
+        "pass_guard_minutes": 30,
+        "freeze_warning_days": 14,
+    },
     "snippets": {
         "iq_max_per_watch": 100,
         "voice_cap_per_desk": 200,
@@ -228,6 +237,25 @@ def _hard_problems(profile):
                                       or value < 0):
                 hard.append("snippets %s must be a number at least 0"
                             % key)
+    updates = profile.get("updates", {})
+    if isinstance(updates, dict):
+        posture = updates.get("posture")
+        if posture not in ("automatic", "notify-only", "off"):
+            hard.append("updates posture must be 'automatic', "
+                        "'notify-only' or 'off'")
+        for key in ("check_interval_hours", "probation_items",
+                    "pass_guard_minutes", "freeze_warning_days"):
+            value = updates.get(key)
+            if not _is_number(value) or value <= 0:
+                hard.append("updates %s must be a positive number"
+                            % key)
+        remote = updates.get("remote")
+        if not isinstance(remote, str) or not remote:
+            hard.append("updates remote must name a git remote")
+        remote_url = updates.get("remote_url")
+        if remote_url is not None \
+                and not isinstance(remote_url, str):
+            hard.append("updates remote_url must be a string")
     advanced = profile.get("advanced", {})
     if isinstance(advanced, dict) and "time_scale" in advanced:
         scale = advanced.get("time_scale")

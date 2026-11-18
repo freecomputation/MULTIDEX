@@ -116,6 +116,15 @@ MARGIN_FRACTION = 0.05
 # occur during any plausible watch.
 LEDGER_FILENAME = "allocation-ledger.json"
 LEDGER_FORMAT = 1
+# The format contract the live update system enforces (0.7.0):
+# this build reads ledger formats LEDGER_READ_MIN..LEDGER_READ_MAX
+# and writes LEDGER_WRITE_FORMAT. A release whose writable format
+# exceeds the standing home's written format is blocked from
+# activation in every posture - code can roll back only while the
+# generation rolling back to can still read the state.
+LEDGER_READ_MIN = 1
+LEDGER_READ_MAX = 1
+LEDGER_WRITE_FORMAT = 1
 RESERVE_HORIZON_S = 48 * 3600
 
 # Two predictions of the same pass (a reserve computed at doctor

@@ -41,7 +41,13 @@ def _profile_path(args, home):
 
 
 def _load(args, home):
-    return load_profile(_profile_path(args, home))
+    path = _profile_path(args, home)
+    if path:
+        # The officer's update-check worker re-loads the same
+        # profile in its own process; the resolved path rides
+        # the environment so both read one file.
+        os.environ["MULTIDEX_PROFILE_PATH"] = path
+    return load_profile(path)
 
 
 def _cmd_watch_tty(args, home, profile):
@@ -96,6 +102,12 @@ def _cmd_watch_tty(args, home, profile):
     if not result.get("ok"):
         print(result.get("refusal", "the watch did not stand"))
         return 2
+    if result.get("handed_over"):
+        print("Watch %s handed over to generation %s at a dwell "
+              "boundary; the keeper starts the successor, which "
+              "adopts the watch from the record."
+              % (result["watch_id"], result["to_generation"]))
+        return 0
     print("Watch %s stood and completed. Products are in %s"
           % (result["watch_id"],
              os.path.join(home, "watches", result["watch_id"])))
@@ -116,6 +128,12 @@ def cmd_watch(args):
     if not result["ok"]:
         print(result["refusal"])
         return 2
+    if result.get("handed_over"):
+        print("Watch %s handed over to generation %s at a dwell "
+              "boundary; the keeper starts the successor, which "
+              "adopts the watch from the record."
+              % (result["watch_id"], result["to_generation"]))
+        return 0
     print("Watch %s stood and completed. Products are in %s"
           % (result["watch_id"],
              os.path.join(home, "watches", result["watch_id"])))
@@ -149,6 +167,18 @@ def cmd_status(args):
         from . import liveview
         return liveview.run_live(home)
     print(products.status_text(home))
+    from . import updater
+    # The update account rides the plain status only where a
+    # generation layout exists; a single-tree install's status
+    # stays exactly the account it has always printed, and its
+    # update mode is stated by doctor and by `update status`.
+    if updater.install_root() is not None:
+        try:
+            profile = _load(args, home)
+        except ProfileError:
+            profile = None
+        for line in updater.status_lines(home, profile):
+            print(line)
     return 0
 
 
@@ -225,6 +255,39 @@ def cmd_doctor(args):
     return 0 if "FAIL" not in text else 1
 
 
+def cmd_update(args):
+    from . import updater
+    home = _home(args)
+    profile = _load(args, home)
+    action = args.update_action or "status"
+    if action == "check":
+        gen, _root = updater.own_generation()
+        try:
+            with updater.CheckLock(home):
+                report = updater.run_check(home, profile,
+                                           running_hash=gen)
+        except updater.UpdateError as exc:
+            print(str(exc))
+            return 1
+        print(report["outcome"])
+        return 0
+    if action == "status":
+        for line in updater.status_lines(home, profile):
+            print(line)
+        return 0
+    if action == "approve":
+        print(updater.approve_candidate(home, profile))
+        return 0
+    if action == "reset":
+        print(updater.reset_failures(home))
+        return 0
+    if action == "rollback":
+        print(updater.request_rollback(home, profile))
+        return 0
+    print("unknown update action: %s" % action)
+    return 2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="multidex",
@@ -257,6 +320,14 @@ def main(argv=None):
     p_ask.set_defaults(fn=cmd_ask)
     sub.add_parser("doctor", help="muster checks and desk inventory") \
         .set_defaults(fn=cmd_doctor)
+    p_update = sub.add_parser(
+        "update", help="live updates: check, status, approve, "
+                       "reset, rollback")
+    p_update.add_argument("update_action", nargs="?",
+                          default="status",
+                          choices=["check", "status", "approve",
+                                   "reset", "rollback"])
+    p_update.set_defaults(fn=cmd_update)
     args = parser.parse_args(argv)
     try:
         return args.fn(args)

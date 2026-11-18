@@ -13,10 +13,11 @@ import fcntl
 import glob
 import math
 import os
+import subprocess
 import threading
 import time
 
-from . import budget, gates, orbit, products, util
+from . import budget, gates, orbit, products, updater, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -272,6 +273,16 @@ class WatchRunner:
         self._held_by_desk = {}
         self._held_total = 0
         self._shed_total = 0
+        # Live updates (0.7.0): this officer's generation, read
+        # from its own tree at startup and never from the
+        # pointer; the handover state the boundary hook sets
+        # when a successor is to adopt the watch; and the
+        # probation record while this generation is on probation.
+        self.generation, self._gen_root = updater.own_generation()
+        self._handed_over = False
+        self._handover_info = None
+        self._probation = None
+        self._keeperless_notice_for = None
 
     # ------------------------------------------------------------ helpers
     def _resolve_source(self, watch_start):
@@ -511,6 +522,7 @@ class WatchRunner:
             "ephemeris_age_days": (None if age is None
                                    else round(max(age, 0.0), 1)),
             "ended_early": False, "end_reason": None, "resumed": False,
+            "generation": self.generation,
             "source_note": source_note,
             "time_scale": self._scale,
             "reception_pool": pool_after,
@@ -528,7 +540,8 @@ class WatchRunner:
         self.tuner = TunerServer(source, profile)
         self.tuner.begin_watch(start)
         muster_data = {"gates": [(n, ok, d) for n, ok, d in gate_list],
-                       "time_scale": self._scale}
+                       "time_scale": self._scale,
+                       "generation": self.generation}
         if source_note:
             muster_data["source_note"] = source_note
             print("Source note: %s" % source_note)
@@ -581,6 +594,12 @@ class WatchRunner:
                             % (name, reason), grade="CONFIRMED",
                     data={"desk": name, "benched": True,
                           "reason": reason}))
+        # Update stages the check worker queued while no officer
+        # was filing land in the Index now, and a generation the
+        # keeper flipped to with no watch standing begins its
+        # probation on this watch.
+        self._drain_update_events(start)
+        self._begin_probation_if_marked(start)
         # The first state the operator can read: published at muster,
         # before the first dwell runs, carrying this officer's pid
         # and heartbeat from the start.
@@ -594,6 +613,11 @@ class WatchRunner:
                 except Exception:
                     pass  # the on-disk record is the honest residue
             raise
+        if self._handed_over:
+            return {"ok": True, "watch_id": watch_id,
+                    "handed_over": True,
+                    "to_generation":
+                        self._handover_info["to_generation"]}
         return {"ok": True, "watch_id": watch_id}
 
     def _resume(self, watch_id):
@@ -690,6 +714,7 @@ class WatchRunner:
         self.tuner = TunerServer(source, profile)
         self.tuner.begin_watch(meta["start"])
         meta["resumed"] = True
+        meta["generation"] = self.generation
         self.index.set_watch_meta(watch_id, meta)
         util.write_json(os.path.join(self.home, "current_watch"),
                         watch_id)
@@ -704,7 +729,14 @@ class WatchRunner:
             watch_id, "officer", "system", resume_t, resume_t,
             content="watch resumed from on-disk state at bill item %d"
                     % state.get("next_index", 0), grade="CONFIRMED",
-            data={"resumed": True}))
+            data={"resumed": True,
+                  "generation": self.generation}))
+        # A resume under a new generation is an adoption when a
+        # handover names it, and a rollback landing when the
+        # keeper's note names it; both file here, with the
+        # tuner gate above standing as the device self-check.
+        self._adopt_handover(resume_t, gate_list)
+        self._drain_update_events(resume_t)
         budget.refresh_reserves(self.ledger, profile, sats, resume_t)
         for statement in self.ledger.load_statements:
             self._file(make_event(
@@ -750,6 +782,11 @@ class WatchRunner:
                 except Exception:
                     pass
             raise
+        if self._handed_over:
+            return {"ok": True, "watch_id": watch_id,
+                    "handed_over": True,
+                    "to_generation":
+                        self._handover_info["to_generation"]}
         return {"ok": True, "watch_id": watch_id}
 
     def _rebuild_held(self):
@@ -934,6 +971,14 @@ class WatchRunner:
                         self.watch_id, next_sitrep, watch_start):
                     self._file(ev)
                 next_sitrep += sitrep_every
+            # The dwell boundary: probation accounting for the
+            # item just finished, then the live-update boundary
+            # hook - a handover flown here returns from the run
+            # without standing the watch down, and the successor
+            # adopts it from the record.
+            self._after_item(bill, idx, item, end_position)
+            if self._handed_over:
+                return
             if self._stop_requested():
                 end_reason = "operator stop"
                 break
@@ -972,6 +1017,7 @@ class WatchRunner:
             "pid": os.getpid(),
             "heartbeat_s": elapsed,
             "executing": executing,
+            "generation": self.generation,
         }
         if self.ledger is not None:
             state["budget"] = self._pool_state()
@@ -1128,6 +1174,7 @@ class WatchRunner:
                   "label": item["label"], "desks": standing,
                   "heard": heard, "bw_hz": item["bw_hz"],
                   "dropped": dropped,
+                  "generation": self.generation,
                   "planned_start": planned_start,
                   "planned_end": planned_start + item["dur"]}))
         for ev in self.exploit.process(self.watch_id, new_events,
@@ -1306,12 +1353,12 @@ class WatchRunner:
                       "language": result.get("language"),
                       "voice_grade": job["grade"]}))
 
-    def _stop_transcription(self):
+    def _stop_transcription(self, quiet=False):
         if self._tx_worker is not None:
             self._tx_worker.stop()
             self._tx_worker = None
         self._drain_transcripts()
-        if self._tx_queue is not None:
+        if self._tx_queue is not None and not quiet:
             counts = dict(self._tx_queue.counts)
             counts["budget_spent_s"] = round(
                 self._tx_queue.budget_spent_s)
@@ -1331,6 +1378,10 @@ class WatchRunner:
                            counts["dropped_queue"],
                            counts["pending_at_stand_down"]),
                 data={"transcription": counts}))
+        if quiet:
+            # A handover is not a stand-down: the queues stop
+            # and drain, but no accounting event files - the
+            # successor's stand-down files the watch's account.
             self._tx_queue = None
 
     def _maybe_interrupt(self, item, new_events, watch_start):
@@ -1386,6 +1437,392 @@ class WatchRunner:
             self._close_item_grant(interrupt,
                                    ev["t_start"] + interrupt["dur"])
             return
+
+    # -------------------------------------------------- live updates
+    def _drain_update_events(self, t):
+        """File the update stages the check worker queued in
+        the Index. The worker never touches the Index itself -
+        one writer, the officer, as everywhere else."""
+        if self.generation is None:
+            return
+        try:
+            with updater.CheckLock(self.home):
+                state = updater.UpdateState.load(self.home)
+                pending = state.drain_events()
+                if pending:
+                    state.save()
+        except updater.UpdateError:
+            return  # a check holds the lock; drain next boundary
+        for ev in pending:
+            self._file(make_event(
+                self.watch_id, ev["desk"], ev["kind"], ev["t"],
+                ev["t"], grade="CONFIRMED", content=ev["content"],
+                data=ev["data"]))
+
+    def _write_probation(self):
+        util.write_json(os.path.join(
+            self.home, updater.PROBATION_FILENAME), self._probation)
+
+    def _begin_probation(self, t):
+        required = int(self.profile["updates"]["probation_items"])
+        self._probation = {
+            "watch_id": self.watch_id, "generation": self.generation,
+            "required": required, "done": 0, "status": "active",
+            "reason": None, "started_at": time.time()}
+        self._write_probation()
+        return required
+
+    def _begin_probation_if_marked(self, t):
+        """A generation the keeper flipped to while no watch
+        stood begins its probation on the next watch it flies."""
+        if self.generation is None:
+            return
+        try:
+            pointer = updater.load_pointer(self.home)
+        except updater.UpdateError:
+            return
+        if not pointer:
+            return
+        current = pointer.get("current") or {}
+        if current.get("hash") == self.generation \
+                and current.get("status") == "probationary":
+            required = self._begin_probation(t)
+            self._file(make_event(
+                self.watch_id, "updater", "update", t, t,
+                grade="CONFIRMED",
+                content="generation flipped: generation %s "
+                        "stands watch %s under probation of %d "
+                        "ordinary items; the keeper marks it "
+                        "successful only when probation passes"
+                        % (self.generation, self.watch_id,
+                           required),
+                data={"stage": "flipped",
+                      "generation": self.generation,
+                      "probation_items": required}))
+
+    def _adopt_handover(self, t, gate_list):
+        """File the landing side of a handover or a rollback on
+        the resume that adopts the watch: the flipped event and
+        the start of probation for an update, the rolled-back
+        event for either kind of return to a known-good
+        generation."""
+        if self.generation is None:
+            return
+        tuner_detail = next(
+            (d for n, _ok, d in gate_list if n == "tuner"), "")
+        handover = util.read_json(os.path.join(
+            self.home, updater.HANDOVER_FILENAME), default=None)
+        if handover and handover.get("watch_id") == self.watch_id \
+                and handover.get("to_generation") \
+                == self.generation:
+            try:
+                os.remove(os.path.join(
+                    self.home, updater.HANDOVER_FILENAME))
+            except OSError:
+                pass
+            updater.clear_activation(self.home)
+            updater.clear_rollback_request(self.home)
+            if handover.get("kind") == "rollback":
+                self._file(make_event(
+                    self.watch_id, "updater", "update", t, t,
+                    grade="CONFIRMED",
+                    content="update rolled back by the "
+                            "operator: watch %s returns to "
+                            "generation %s from generation %s "
+                            "at a dwell boundary; no probation "
+                            "applies to a known-good generation"
+                            % (self.watch_id, self.generation,
+                               handover.get("from_generation")),
+                    data={"stage": "rolled_back",
+                          "generation": self.generation,
+                          "from_generation":
+                              handover.get("from_generation"),
+                          "snapshot": handover.get("snapshot")}))
+            else:
+                required = self._begin_probation(t)
+                self._file(make_event(
+                    self.watch_id, "updater", "update", t, t,
+                    grade="CONFIRMED",
+                    content="generation flipped: generation %s "
+                            "took the tuner for watch %s from "
+                            "generation %s; the watch was "
+                            "adopted from the record at bill "
+                            "item %d, the tuner self-check "
+                            "passed (%s), and probation of %d "
+                            "ordinary items begins"
+                            % (self.generation, self.watch_id,
+                               handover.get("from_generation"),
+                               handover.get("next_index", 0),
+                               tuner_detail, required),
+                    data={"stage": "flipped",
+                          "generation": self.generation,
+                          "from_generation":
+                              handover.get("from_generation"),
+                          "probation_items": required,
+                          "snapshot": handover.get("snapshot")}))
+            return
+        note = util.read_json(os.path.join(
+            self.home, updater.ROLLBACK_NOTE_FILENAME),
+            default=None)
+        if note and note.get("watch_id") == self.watch_id \
+                and note.get("to_generation") == self.generation:
+            try:
+                os.remove(os.path.join(
+                    self.home, updater.ROLLBACK_NOTE_FILENAME))
+            except OSError:
+                pass
+            self._file(make_event(
+                self.watch_id, "updater", "update", t, t,
+                grade="CONFIRMED",
+                content="update rolled back: generation %s "
+                        "failed probation on watch %s (%s); "
+                        "the pre-handover snapshot was "
+                        "restored and generation %s resumes "
+                        "the watch from it"
+                        % (note.get("from_generation"),
+                           self.watch_id, note.get("reason"),
+                           self.generation),
+                data={"stage": "rolled_back",
+                      "generation": self.generation,
+                      "from_generation":
+                          note.get("from_generation"),
+                      "reason": note.get("reason"),
+                      "snapshot": note.get("snapshot")}))
+            if note.get("degraded"):
+                self._file(make_event(
+                    self.watch_id, "updater", "update", t, t,
+                    grade="CONFIRMED",
+                    content="update posture degraded: %d "
+                            "failed activations in 24 hours "
+                            "reach the intensity limit; "
+                            "automatic activation degrades to "
+                            "notify-only until an operator "
+                            "resets it with: multidex update "
+                            "reset" % updater.INTENSITY_LIMIT,
+                    data={"stage": "posture_degraded"}))
+            return
+        probation = util.read_json(os.path.join(
+            self.home, updater.PROBATION_FILENAME), default=None)
+        if probation and probation.get("status") == "active" \
+                and probation.get("watch_id") == self.watch_id \
+                and probation.get("generation") == self.generation:
+            self._probation = probation
+
+    def _probation_after_item(self, item, t):
+        """Probation accounting for one finished item. Passes
+        do not count - probation is proven on ordinary work.
+        A gap the item filed with a probation cause fails it;
+        the keeper reads the failure off the probation file
+        and rolls back."""
+        if not self._probation \
+                or self._probation.get("status") != "active":
+            return
+        if item.get("kind") == "pass":
+            return
+        gaps = [ev for ev in self.index.events(
+            watch_id=self.watch_id, kinds=["gap"], limit=100000)
+            if ev["data"].get("bill_id") == item["id"]
+            and ev["data"].get("cause")
+            in updater.PROBATION_FAIL_CAUSES]
+        if gaps:
+            self._probation["status"] = "failed"
+            self._probation["reason"] = gaps[-1]["content"]
+            self._write_probation()
+            self._file(make_event(
+                self.watch_id, "updater", "update", t, t,
+                grade="CONFIRMED",
+                content="probation failed: generation %s on "
+                        "watch %s: %s; the keeper rolls back "
+                        "at the next boundary"
+                        % (self.generation, self.watch_id,
+                           gaps[-1]["content"]),
+                data={"stage": "probation_failed",
+                      "generation": self.generation,
+                      "bill_id": item["id"],
+                      "reason": gaps[-1]["content"]}))
+            return
+        self._probation["done"] += 1
+        if self._probation["done"] >= self._probation["required"]:
+            self._probation["status"] = "passed"
+            self._write_probation()
+            self._file(make_event(
+                self.watch_id, "updater", "update", t, t,
+                grade="CONFIRMED",
+                content="probation passed: generation %s "
+                        "completed %d ordinary items of watch "
+                        "%s with the event log advancing and "
+                        "the tuner working; the keeper marks "
+                        "the generation successful"
+                        % (self.generation,
+                           self._probation["required"],
+                           self.watch_id),
+                data={"stage": "probation_passed",
+                      "generation": self.generation,
+                      "items": self._probation["required"]}))
+        else:
+            self._write_probation()
+
+    def _after_item(self, bill, next_idx, item, position):
+        """The dwell-boundary hook: probation first, then the
+        update boundary - due checks spawn, queued stages
+        file, and a written activation or rollback request is
+        considered for handover."""
+        self._probation_after_item(item, position)
+        if next_idx < len(bill):
+            self._update_boundary(bill, next_idx, position)
+
+    def _profile_path_for_worker(self):
+        env = os.environ.get("MULTIDEX_PROFILE_PATH")
+        if env and os.path.exists(env):
+            return env
+        directory = self.profile.get("_dir")
+        if directory:
+            candidate = os.path.join(
+                directory, self.profile["name"] + ".toml")
+            if os.path.exists(candidate):
+                return candidate
+        candidate = os.path.join(self._gen_root, "profiles",
+                                 "default.toml")
+        if os.path.exists(candidate):
+            return candidate
+        return None
+
+    def _spawn_update_check(self):
+        profile_path = self._profile_path_for_worker()
+        if not profile_path:
+            return
+        env = dict(os.environ)
+        env["PYTHONPATH"] = self._gen_root + os.pathsep \
+            + env.get("PYTHONPATH", "")
+        try:
+            log = open(os.path.join(self.home,
+                                    "update-check.log"), "a")
+        except OSError:
+            return
+        import sys as _sys
+        try:
+            subprocess.Popen(
+                [_sys.executable, "-m", "multidex.updater",
+                 "check-worker", self.home, profile_path],
+                cwd=self._gen_root, env=env, stdout=log,
+                stderr=log, start_new_session=True)
+        except OSError:
+            pass
+
+    def _update_boundary(self, bill, next_idx, position):
+        if self.generation is None:
+            return
+        self._drain_update_events(position)
+        root = updater.install_root()
+        if root is None:
+            return
+        upd = self.profile["updates"]
+        state = updater.UpdateState.load(self.home)
+        last = state.data.get("last_check") or 0
+        if time.time() - last >= upd["check_interval_hours"] \
+                * 3600:
+            self._spawn_update_check()
+        intent = None
+        rollback = updater.read_rollback_request(self.home)
+        if rollback:
+            intent = {"to_generation": rollback["to_hash"],
+                      "kind": "rollback",
+                      "reason": rollback.get("reason")}
+        else:
+            activation = updater.read_activation(self.home)
+            if activation:
+                intent = {"to_generation": activation["hash"],
+                          "kind": "update",
+                          "counter": activation.get("counter")}
+        if intent is None:
+            return
+        target = intent["to_generation"]
+        if target == self.generation:
+            updater.clear_activation(self.home)
+            updater.clear_rollback_request(self.home)
+            return
+        if not os.path.isdir(updater.generation_dir(root, target)):
+            return  # a stale request for a tree that is not here
+        if intent["kind"] == "update":
+            cand = state.data.get("candidate") or {}
+            if cand.get("hash") != target \
+                    or cand.get("status") != "staged" \
+                    or target in state.data["bad"]:
+                return  # approval no longer matches a staged,
+                        # gate-passed, unbad candidate
+        # The pass guard: no handover or rollback flies when
+        # the next item is a satellite pass, or with a pass
+        # inside the guard window. Deferral is silent and
+        # retried at the next boundary - the intent stays
+        # written.
+        guard_s = upd["pass_guard_minutes"] * 60
+        for future in bill[next_idx:]:
+            if future.get("kind") == "pass":
+                if future is bill[next_idx] \
+                        or future["start"] - position <= guard_s:
+                    return
+                break
+        if not os.environ.get("MULTIDEX_KEEPER"):
+            if self._keeperless_notice_for != target:
+                self._keeperless_notice_for = target
+                self._file(make_event(
+                    self.watch_id, "updater", "update", position,
+                    position, grade="CONFIRMED",
+                    content="update activation is written for "
+                            "generation %s, but no keeper "
+                            "supervises this watch; the "
+                            "handover waits until the watch "
+                            "is stood under the keeper" % target,
+                    data={"stage": "handover_waiting",
+                          "generation": target}))
+            return
+        snapshot_id = "snap-%s-%d" % (self.watch_id,
+                                      int(time.time()))
+        updater.take_snapshot(self.home, snapshot_id)
+        if intent["kind"] == "update":
+            what = "release %s" % intent.get("counter")
+        else:
+            what = "operator rollback"
+        self._file(make_event(
+            self.watch_id, "updater", "update", position,
+            position, grade="CONFIRMED",
+            content="update handover: watch %s hands over at a "
+                    "dwell boundary from generation %s to "
+                    "generation %s (%s); state is "
+                    "checkpointed, the tuner is closed, and "
+                    "the keeper starts the successor, which "
+                    "adopts the watch from the record"
+                    % (self.watch_id, self.generation, target,
+                       what),
+            data={"stage": "handover",
+                  "from_generation": self.generation,
+                  "to_generation": target,
+                  "kind": intent["kind"],
+                  "snapshot": snapshot_id}))
+        util.write_json(os.path.join(
+            self.home, updater.HANDOVER_FILENAME), {
+                "watch_id": self.watch_id,
+                "from_generation": self.generation,
+                "to_generation": target,
+                "kind": intent["kind"],
+                "counter": intent.get("counter"),
+                "snapshot": snapshot_id,
+                "next_index": next_idx,
+                "at": time.time()})
+        state_now = util.read_json(os.path.join(
+            self.watch_dir, "state.json"), default={}) or {}
+        state_now["handed_over_to"] = target
+        util.write_json(os.path.join(self.watch_dir,
+                                     "state.json"), state_now)
+        # The desk workers are idle at a boundary by
+        # construction - supervisor.run is synchronous, so no
+        # job is in flight here - and shutdown reaps them.
+        # Transcription and LRPT workers drain their finished
+        # work and stop without filing a stand-down account.
+        self._stop_transcription(quiet=True)
+        self.supervisor.shutdown()
+        self._handed_over = True
+        self._handover_info = intent
 
     # ----------------------------------------------------------- stand down
     def _stand_down(self, bill, watch_start, end_reason):

@@ -11,6 +11,20 @@ from . import util
 
 GRADES = ("CONFIRMED", "PROBABLE", "UNRESOLVED")
 
+# The event log's format contract, enforced by the live update
+# system (0.7.0): the log is append-only JSONL, one event object
+# per line, in the shape make_event writes. Evolution is additive
+# only - new fields optional, old fields never renamed or
+# repurposed, new meanings carried by new event kinds - and every
+# reader ignores fields and kinds it does not know. This build
+# reads log formats EVENTLOG_READ_MIN..EVENTLOG_READ_MAX and
+# writes EVENTLOG_WRITE_FORMAT; a release that would raise the
+# written format is blocked from automatic activation.
+EVENTLOG_FORMAT = 1
+EVENTLOG_READ_MIN = 1
+EVENTLOG_READ_MAX = 1
+EVENTLOG_WRITE_FORMAT = 1
+
 # Event kinds used across the system.
 KINDS = (
     "decode",       # a decoder produced content or a structured record
@@ -27,6 +41,7 @@ KINDS = (
     "desk_health",  # a desk crash, benching, or recovery
     "assessment",   # an exploitation assessment with evidence links
     "system",       # watch lifecycle: muster, stand-down, resume
+    "update",       # live update lifecycle: offered to rolled back
 )
 
 
