@@ -50,8 +50,17 @@ ROTATION = {
     "cellular": (752.5e6, 2.4e6, ["cellular"], "all"),
     "trunking": (851.75e6, 2.4e6, ["trunking"], "all"),
     "fmband":   (98e6, 2.4e6, ["broadcast", "sweep"], "all"),
-    "hf_day":   (14.15e6, 2.4e6, ["sweep", "amateur"], "day"),
-    "hf_night": (7.1e6, 2.4e6, ["sweep", "amateur"], "night"),
+    # HF entries carry the HFDL desk on a propagation split:
+    # day windows (12.3 MHz spanning the 11.3/13.3 MHz station
+    # clusters, 17.9 and 21.9 MHz) serve the day channel set,
+    # night windows (10.0, 8.9, 6.6, 5.5 MHz) the night set -
+    # both transcribed from the dumphfdl system table and held
+    # in desks.HFDL_DAY_CHANNELS / HFDL_NIGHT_CHANNELS. Successive
+    # dwells cycle the window centres, as on the airband slots.
+    "hf_day":   ((12.3e6, 17.9e6, 21.9e6), 2.4e6,
+                 ["sweep", "amateur", "hfdl"], "day"),
+    "hf_night": ((10.0e6, 8.9e6, 6.6e6, 5.5e6), 2.4e6,
+                 ["sweep", "amateur", "hfdl"], "night"),
 }
 
 SWEEP_WINDOWS = [7.05e6, 14.2e6, 28.4e6, 50.5e6, 121.5e6, 146.5e6,

@@ -31,6 +31,8 @@ CONSEQUENCE = {
     "cellular": "the cellular census is not reported",
     "trunking": "trunked systems are not censused",
     "broadcast": "the broadcast census is not reported",
+    "hfdl": "no HFDL datalink messages are reported; HF spectrum "
+            "rests on the sweep and audio census desks",
 }
 
 
@@ -294,6 +296,13 @@ def render_report(index, watch_id):
                 desk, "that service is unreported")))
     L.append("Antenna for this watch: %s." % meta.get("antenna",
                                                       "not recorded"))
+    if meta.get("source") == "real" and "hfdl" not in benched:
+        L.append("HFDL stood this watch, and its coverage is "
+                 "opportunistic: the fixed antenna is a VHF/UHF "
+                 "antenna, so the desk reports the frames the "
+                 "bound decoder heard on the rotation's HF "
+                 "windows and claims nothing about HFDL traffic "
+                 "beyond them.")
     L.append("")
     L.append("## 3. Day picture, service by service")
     for desk in sorted(picture["by_desk"]):

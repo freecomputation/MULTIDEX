@@ -222,23 +222,25 @@ def test_audit_time_scale_string_refused(profile):
 def test_audit_state_benched_includes_capability_benches(home, profile,
                                                          index):
     """state.json's benched list must carry every desk the officer
-    itself considers benched, including build benches such as hfdl
-    (0.2.0: hfdl is the always-benched desk; in 0.1.x this test used
-    acars, which stood up in 0.2.0); status prints 'all standing
-    desks healthy' when the list is empty."""
+    itself considers benched (0.1.x pinned this on acars, 0.2.0 on
+    hfdl; both desks stand now - acars in pure Python, hfdl on the
+    bound dumphfdl - so 0.2.1 pins the property on a profile bench,
+    which holds on any host); status prints 'all standing desks
+    healthy' when the list is empty."""
+    profile["desks"]["bench"] = ["pager"]
     runner = WatchRunner(home, profile, index)
     runner.watch_id = "watch-state"
     runner.watch_dir = index.watch_dir("watch-state")
     src = RealSource(profile)
-    reason = runner._desk_benched_reason("hfdl", src)
-    assert reason is not None, "sanity: hfdl must bench on real"
+    reason = runner._desk_benched_reason("pager", src)
+    assert reason is not None, "sanity: pager must bench by profile"
     item = {"start": T0, "dur": 150, "label": "Rotation adsb",
             "desks": ["adsb"]}
     runner._save_state(1, item, T0)
     state = json.load(open(os.path.join(runner.watch_dir,
                                         "state.json")))
-    assert "hfdl" in state["benched"], (
-        "officer benches hfdl (%r) but state.json benched=%r, so "
+    assert "pager" in state["benched"], (
+        "officer benches pager (%r) but state.json benched=%r, so "
         "status reports all desks healthy" % (reason, state["benched"]))
 
 

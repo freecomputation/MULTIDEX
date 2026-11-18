@@ -42,4 +42,11 @@ TOOL_DESKS = {
                      "trunked systems are censused as metadata by "
                      "the trunking desk and no DMR, P25 or NXDN "
                      "signalling decode is claimed"),
+    "hfdl": ("dumphfdl",
+             "HFDL decode binds the dumphfdl program (GPL-3.0, "
+             "with the MIT libacars library), staged in user "
+             "space; it is not installed on this host. Until it "
+             "is staged, HF spectrum is censused by the sweep "
+             "and audio census desks on every HF dwell and no "
+             "HFDL decode is claimed"),
 }

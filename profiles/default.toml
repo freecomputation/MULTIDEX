@@ -73,7 +73,7 @@ hf_night = { weight = 4,  dwell_s = 300 }
 stand = ["adsb", "airband", "milair", "acars", "ais", "wxradio", "ism",
          "aprs", "pager", "sweep", "satellite", "sonde", "cellular",
          "trunking", "broadcast", "audiocensus", "amateur", "iss",
-         "vdl2", "digitalvoice"]
+         "vdl2", "digitalvoice", "hfdl"]
 # Desks to bench even though they could stand.
 bench = []
 

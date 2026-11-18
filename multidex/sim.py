@@ -300,7 +300,7 @@ class SimSource:
         return {"adsb", "airband", "milair", "acars", "ais", "wxradio",
                 "ism", "aprs", "pager", "sweep", "satellite", "sonde",
                 "cellular", "trunking", "broadcast", "audiocensus",
-                "amateur", "iss", "vdl2", "digitalvoice"}
+                "amateur", "iss", "vdl2", "digitalvoice", "hfdl"}
 
     # -------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -420,6 +420,8 @@ class SimSource:
             elif desk == "digitalvoice":
                 feeds["digitalvoice"] = self._digitalvoice_feed(
                     center_hz, t0, t1)
+            elif desk == "hfdl":
+                feeds["hfdl"] = self._hfdl_feed(center_hz, t0, t1)
             elif desk == "sonde":
                 feeds["sonde"] = {"frames": self._sonde_frames(t0, t1)}
             elif desk == "cellular":
@@ -755,6 +757,21 @@ class SimSource:
                 "raw": "simulated vdl2 frame"})
         elif rng.random() < 0.5:
             feed["bursts"].append({"count": rng.randrange(2, 9)})
+        return feed
+
+    def _hfdl_feed(self, center_hz, t0, t1):
+        rng = _rng(self.world.seed, int(center_hz), int(t0 // 900))
+        feed = {"messages": []}
+        if rng.random() < 0.5:
+            feed["messages"].append({
+                "freq_hz": float(center_hz),
+                "pdu": "lpdu",
+                "src": {"type": "Aircraft", "id": 12,
+                        "ac_info": {"icao": "A23721"}},
+                "dst": {"type": "Ground station", "id": 4,
+                        "name": "Riverhead, New York"},
+                "type_name": "Logon confirm",
+                "raw": "simulated hfdl frame"})
         return feed
 
     def _digitalvoice_feed(self, center_hz, t0, t1):

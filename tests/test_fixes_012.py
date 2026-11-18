@@ -360,11 +360,12 @@ def test_bench_reasons_unifies_all_sources(profile):
         supervisor_benched={"pager": "crashed twice (test)"})
     # 0.2.0: acars stands in pure Python; vdl2 benches conditionally
     # on the dumpvdl2 host tool with its staging instruction.
+    # 0.2.1: hfdl benches the same conditional way, on dumphfdl.
     assert "acars" not in out
     assert out["satellite"] == "ephemeris bench (test)"
     assert out["pager"] == "crashed twice (test)"
     assert out["vdl2"].startswith("VDL2 decode binds the dumpvdl2")
-    assert out["hfdl"].startswith("HFDL decode stays benched")
+    assert out["hfdl"].startswith("HFDL decode binds the dumphfdl")
     assert "adsb" not in out
 
 

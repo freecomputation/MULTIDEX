@@ -180,9 +180,17 @@ def _run_dumpvdl2(source, t0, t1):
             iq_path, 90)
         if size == 0:
             return msgs
-        _run_tool(["dumpvdl2", "--iq", iq_path,
-                   "--sample-rate", str(rate),
-                   "--output", "json:file:%s" % out_path],
+        # dumpvdl2 2.7.0 invocation, verified against the staged
+        # program: the input flag is --iq-file (--iq is accepted
+        # as an abbreviation), there is no --sample-rate option
+        # (the default rate is already 1050000 sps and the
+        # default channel 136975000 Hz, matching the capture),
+        # and the output specifier grammar is
+        # decoded:json:file:path=<file>. The 0.2.0 form failed on
+        # both counts and _run_tool swallowed the failure, so the
+        # desk decoded nothing while appearing to run.
+        _run_tool(["dumpvdl2", "--iq-file", iq_path,
+                   "--output", "decoded:json:file:path=%s" % out_path],
                   timeout=180)
         with open(out_path) as fh:
             for line in fh:
@@ -191,12 +199,21 @@ def _run_dumpvdl2(source, t0, t1):
                 except ValueError:
                     continue
                 v = obj.get("vdl2", {})
-                app = v.get("app", {})
-                acars = app.get("acars", {}) if isinstance(
-                    app, dict) else {}
+                # In the program's JSON the ACARS block libacars
+                # structured nests under the AVLC frame that
+                # carried it (vdl2.avlc.acars); vdl2.app carries
+                # only the program name and version. Frames with
+                # no ACARS block yield no message - nothing is
+                # extracted from other payloads.
+                avlc = v.get("avlc", {})
+                acars = avlc.get("acars", {}) if isinstance(
+                    avlc, dict) else {}
                 if acars:
+                    dst = avlc.get("dst", {})
                     msgs.append({
-                        "tail": acars.get("reg") or v.get("dst"),
+                        "tail": acars.get("reg") or (
+                            dst.get("addr") if isinstance(
+                                dst, dict) else None),
                         "text": "ACARS over VDL2 label %s: %s"
                                 % (acars.get("label"),
                                    (acars.get("msg_text") or "")
@@ -219,7 +236,11 @@ def _run_dsd_fme(center_hz, seconds):
     parse its log for call metadata. The program's own output
     vocabulary varies by build; the parser is deliberately
     narrow (protocol + talkgroup lines) and anything it cannot
-    read is not reported."""
+    read is not reported. Field note: the program's rtl path
+    reports a center frequency 252 kHz above the requested
+    channel, which reads as its internal offset tuning (its
+    demod output is at 12 kHz); the invocation is unchanged
+    for it."""
     calls = []
     try:
         proc = subprocess.Popen(
@@ -254,6 +275,125 @@ def _run_dsd_fme(center_hz, seconds):
                 "encrypted": "encrypt" in line.lower(),
                 "freq_hz": center_hz})
     return calls
+
+
+def _dumphfdl_systable_path():
+    """The staged dumphfdl's system table, resolved from the
+    program's own location: the staged layout puts the program
+    in <prefix>/bin and the table in
+    <prefix>/share/dumphfdl/systable.conf. dumphfdl does not
+    load the table by default (its documentation says so, and a
+    bounded run without the option confirmed it), so the feed
+    passes it explicitly when the staged file is found beside
+    the program. No host's home path is written here: the
+    resolution follows whichever dumphfdl the PATH carries.
+    Returns None when no table sits at the resolved path; the
+    program still decodes without it, with numeric station and
+    frequency ids in its output."""
+    exe = shutil.which("dumphfdl")
+    if not exe:
+        return None
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(exe)))
+    path = os.path.join(prefix, "share", "dumphfdl", "systable.conf")
+    return path if os.path.exists(path) else None
+
+
+def _parse_dumphfdl_output(path):
+    """Parse dumphfdl decoded JSON output into message dicts.
+
+    The envelope is the program's own (fmtr-json in the
+    dumphfdl source): {"hfdl": {"app", "t", "freq" (Hz),
+    "bit_rate", "sig_level", ..., <pdu>}} where <pdu> is one of
+    spdu, mpdu, lpdu, hfnpdu carrying "err", "src" and "dst"
+    party objects. The parser is deliberately narrow, on the
+    DSD-FME discipline: a frame whose PDU is flagged err, and
+    anything that is not a decoded HFDL frame, yields no
+    message."""
+    msgs = []
+    try:
+        fh = open(path)
+    except OSError:
+        return msgs
+    with fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            h = obj.get("hfdl", {})
+            if not isinstance(h, dict):
+                continue
+            pdu = None
+            for key in ("spdu", "lpdu", "mpdu", "hfnpdu"):
+                if isinstance(h.get(key), dict):
+                    pdu = key
+                    break
+            if pdu is None:
+                continue
+            body = h[pdu]
+            if body.get("err"):
+                continue
+            type_name = None
+            ptype = body.get("type")
+            if isinstance(ptype, dict):
+                type_name = ptype.get("name")
+            msgs.append({
+                "freq_hz": h.get("freq"),
+                "pdu": pdu,
+                "src": body.get("src"),
+                "dst": body.get("dst"),
+                "type_name": type_name,
+                "ac_info": body.get("ac_info"),
+                "raw": line.strip()[:400]})
+    return msgs
+
+
+def _run_dumphfdl(center_hz, channels_khz, seconds):
+    """Run dumphfdl against the RTL-SDR for a bounded slice and
+    return its decoded frames. The invocation is the staged
+    program's proven form: SoapySDR device driver=rtlsdr with
+    direct sampling mode 2 (the HF input), 3.2 Msps, gain 40,
+    the window centre in kHz, decoded JSON to a file, and the
+    monitored channels as kHz arguments. dumphfdl exits
+    gracefully on TERM, so the bound is a terminate, and the
+    output file keeps whatever was decoded up to it. Any
+    failure yields an empty list - the dwell's gap machinery
+    reports capture health separately."""
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json",
+                                         delete=False) as fh:
+            out_path = fh.name
+        cmd = ["dumphfdl", "--soapysdr", "driver=rtlsdr",
+               "--device-settings", "direct_samp=2",
+               "--sample-rate", "3200000",
+               "--centerfreq", "%g" % (center_hz / 1000.0),
+               "--gain", "40",
+               "--output", "decoded:json:file:path=%s" % out_path]
+        table = _dumphfdl_systable_path()
+        if table:
+            cmd += ["--system-table", table]
+        cmd += ["%g" % f for f in channels_khz]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            proc.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        return _parse_dumphfdl_output(out_path)
+    except Exception:
+        return []
+    finally:
+        if out_path:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
 
 
 # ----------------------------------------------------------- Mode S demod
@@ -491,6 +631,8 @@ class RealSource:
             caps.add("vdl2")
         if tool_available("dsd-fme"):
             caps.add("digitalvoice")
+        if tool_available("dumphfdl"):
+            caps.add("hfdl")
         return caps
 
     # -------------------------------------------------------- raw capture
@@ -880,6 +1022,28 @@ class RealSource:
             return {"calls": []}
         return {"calls": _run_dsd_fme(center_hz,
                                       min(60.0, max(10.0, t1 - t0)))}
+
+    def _feed_hfdl(self, vfos, center_hz, bw_hz, t0, t1):
+        """HFDL via the bound dumphfdl program, which drives the
+        SDR itself through SoapySDR with direct sampling. The
+        monitored channels are the system-table day and night
+        sets' channels inside this dwell's window - every one of
+        them also inside the program's capture span at its
+        3.2 Msps rate - and the listen is a bounded slice of the
+        dwell, not the whole dwell."""
+        from .toolbind import tool_available
+        if not tool_available("dumphfdl"):
+            return {"messages": []}
+        from .desks import HFDL_DAY_CHANNELS, HFDL_NIGHT_CHANNELS
+        lo, hi = center_hz - bw_hz / 2, center_hz + bw_hz / 2
+        channels = sorted(
+            f / 1000.0
+            for f in HFDL_DAY_CHANNELS + HFDL_NIGHT_CHANNELS
+            if lo <= f <= hi)
+        if not channels:
+            return {"messages": []}
+        return {"messages": _run_dumphfdl(
+            center_hz, channels, min(120.0, max(10.0, t1 - t0)))}
 
     def _feed_ais(self, vfos, center_hz, bw_hz, t0, t1):
         sentences = []
