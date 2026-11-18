@@ -1,0 +1,24 @@
+# 12 Operation, law and ethics
+
+## Receive only, by construction
+
+MULTIDEX cannot transmit. There is no transmission path in any desk, at any tier, in either source: the Tuner Server takes tuning orders and returns samples, and no code path in the system keys a transmitter, because the hardware it drives is a receiver and the design treats that as a law rather than a limitation. The eighth law's second half follows from the same construction. Encrypted traffic is metadata: the cellular and trunking desks census presence, band, identity where broadcast and signal strength, and mark every event metadata only. Content that the watch cannot lawfully or technically read is not approached; the census is the product.
+
+This matters practically as well as ethically. An operator asked what the system does to the spectrum can answer exactly: nothing. It listens, it records what it heard, and it accounts for where it was not listening. Interference claims, direction-finding disputes and most regulatory theories about active equipment do not survive contact with a receive-only record that includes its own gaps.
+
+## The operator's responsibility for local law
+
+Reception law varies by jurisdiction and by service, and this manual does not give legal advice. The operator is responsible for knowing and following the law where the antenna stands: which bands may be received, which received content may be recorded, retained or disclosed, and which services carry statutory protection even against reception. The system gives the operator the tools to comply. The profile's excluded bands keep the watch off spectrum entirely. The desk roster benches whole services. The snippet caps bound how much intercepted audio is retained, and the disk ceiling bounds the whole record. Where a jurisdiction restricts a service, the compliant configuration is to bench the desk or exclude the band, and to say so in the profile that stands the watch, so the record itself shows the discipline was applied in advance rather than improvised afterward.
+
+Nothing in the system publishes. Under the locality law there are no accounts, no uploads and no telemetry; a product leaves the host only by the operator's own hand. That design choice keeps the disclosure decision where the law puts it: with the operator, per product, with the coverage account attached.
+
+## Privacy discipline for intercepted audio
+
+A watch hears other people's transmissions. Some of what it files is broadcast by design, weather radio, aviation voice on published frequencies, satellite downlinks meant for anyone with a receiver. Some of it is addressed traffic radiated in the clear, pager messages being the standing example in this build: addressed to one recipient, audible to everyone in earshot, and recorded by the pager desk on exactly those terms, marked broadcast in the event data because the radiation, not the addressing, is what the receiver met.
+
+The discipline the system applies is minimisation and plain labelling. Voice audio is kept as snippets under per-desk caps, not as a rolling archive of everything audible. Transcripts are not produced by this build at all. Dossiers are built on emitter identities that are themselves broadcast, callsigns, addresses and identifiers transmitted for the purpose of being received. The Index is local data on the operator's machine, and the operator who shares a product shares a document they have read, with the coverage account in it, rather than a feed they have not. Operators should apply the same minimisation to their own handling: keep watches for the spectrum questions they were stood to answer, shed evidence the question does not need, and treat any intercepted content that identifies a private person with the care its sensitivity deserves regardless of how it arrived.
+
+## Position discipline in products
+
+The home position is the most sensitive fact a watch holds, because the whole record is indexed to it. The system's discipline is structural. The position lives in the profile, which is local. The muster gate verifies that a position is set without printing it. Products refer to the position only through the profile's region words, "the central United States" in the shipped default, so a Watch Report can be shared without sharing coordinates. Ask answers speak about emitters, frequencies, bands and desks, not about the receiver's location. The shipped reference position is a further guard for new operators: a first watch stood without editing the profile reports the sky over the reference position, wrong but harmless, rather than the sky over a real antenna whose coordinates were never meant to travel. Set the position for a real watch, keep the profile with the machine, and let the products carry the region words. That is the whole of the discipline, and it is enough when it is followed.
+
