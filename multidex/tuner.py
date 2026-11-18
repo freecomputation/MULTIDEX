@@ -879,8 +879,49 @@ class RealSource:
                       "bins": [round(v, 1) for v in
                                displayfeed.pool_bins(
                                    [p - 60 for p in power])]}}
+        excerpt = self._scan_excerpt(raw, rate, center_hz,
+                                     emissions, floor)
+        if excerpt is not None:
+            result["excerpts"] = [excerpt]
         self._scan_cache[key] = result
         return result
+
+    def _scan_excerpt(self, raw, rate, center_hz, emissions, floor):
+        """The scan's tier 2 excerpt (0.10.0): the strongest
+        emission at or above the sweep desk's own 30 dB
+        interrupt threshold, channelized out of the same
+        capture the power array came from - the capture's own
+        samples around the emission, decimated to a channel
+        rate and ci16-encoded for the desk's SigMF pair. None
+        when no emission qualifies, or when numpy is not on
+        the host: the scan itself is pure Python and never
+        benches for an excerpt."""
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+        best = None
+        for em in emissions:
+            snr = em["peak_dbm"] - (floor - 60.0)
+            if snr >= 30.0 and (best is None or snr > best[0]):
+                best = (snr, em)
+        if best is None:
+            return None
+        em = best[1]
+        from . import audiocensus
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        chan, crate = audiocensus._extract(
+            iq, float(rate), em["freq_hz"] - center_hz, em["bw_hz"])
+        exc = audiocensus._excerpt(chan, crate)
+        if exc is None:
+            return None
+        exc["freq_hz"] = em["freq_hz"]
+        exc["bw_hz"] = em["bw_hz"]
+        return exc
 
     # ------------------------------------------------------------ capture
     def capture(self, center_hz, bw_hz, t0, t1, vfos):

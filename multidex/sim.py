@@ -479,11 +479,53 @@ class SimSource:
                 if bump > 0.5:
                     v = max(v, floor + bump)
             bins.append(round(v, 1))
+        excerpts = []
+        unk = [e for e in emissions
+               if (e.get("shape") or "").startswith("unknown")]
+        if unk:
+            em = max(unk, key=lambda e: e["peak_dbm"])
+            if em["peak_dbm"] - floor >= 30.0:
+                exc = self._scan_excerpt(em, t0)
+                if exc is not None:
+                    excerpts.append(exc)
         return {"noise_floor_db": round(floor, 1),
                 "emissions": emissions,
+                "excerpts": excerpts,
                 "display": {"lo_hz": lo, "hi_hz": hi,
                             "floor_db": round(floor, 1),
                             "bins": bins}}
+
+    def _scan_excerpt(self, em, t0):
+        """A synthesized tier 2 excerpt for the world's
+        strongest unknown emission (0.10.0): its shape rendered
+        as channel samples at 48 ksps - a chirp sweeps, a pulsed
+        emission gates, anything else holds a tone - over noise,
+        encoded the way the real source encodes its captures.
+        The desk marks it synthetic in its SigMF metadata."""
+        import numpy as np
+        from . import sigmf
+        rng = _rng(self.world.seed, int(em["freq_hz"]), int(t0))
+        gen = np.random.default_rng(int(rng.random() * 1e9))
+        rate = 48000.0
+        n = int(rate * 0.5)
+        t = np.arange(n) / rate
+        shape = em.get("shape") or ""
+        if "chirp" in shape:
+            phase = 2 * np.pi * (-8000.0 * t + 16000.0 * t * t)
+            sig = np.exp(1j * phase)
+        elif "pulsed" in shape:
+            gate = ((t % 0.1) < 0.03).astype(np.float64)
+            sig = gate * np.exp(2j * np.pi * 1000.0 * t)
+        else:
+            sig = np.exp(2j * np.pi * 1500.0 * t)
+        noise = 0.05 * (gen.normal(0, 1, n)
+                        + 1j * gen.normal(0, 1, n))
+        chan = (0.8 * sig + noise).astype(np.complex64)
+        data, peak = sigmf.data_bytes(chan)
+        import base64 as _b64
+        return {"b64": _b64.b64encode(data).decode("ascii"),
+                "rate": rate, "peak": peak, "samples": n,
+                "freq_hz": em["freq_hz"], "bw_hz": em["bw_hz"]}
 
     def _airband_active(self, freq_hz, t):
         w = self.world

@@ -21,6 +21,7 @@ silently (the feed builders surface the import failure as the
 desk's capture error).
 """
 
+import base64
 import math
 
 import numpy as np
@@ -37,6 +38,14 @@ MAX_SNIPPETS = 4
 SNIPPET_MIN_S = 3.0
 SNIPPET_MAX_S = 15.0
 AUDIO_RATE = 16000
+# Tier 2 excerpts (0.10.0): a candidate the census extracted -
+# so it cleared EXTRACT_MIN_SNR_DB - but could not classify
+# carries a decimated channel IQ excerpt for later
+# classification: the channel's most active span, bounded in
+# samples (about 2 s at the 48 ksps narrow-channel rate), at
+# most this many per window, strongest first.
+EXCERPT_MAX_SAMPLES = 96000
+EXCERPT_MAX_PER_WINDOW = 2
 
 
 # ------------------------------------------------------------ PSD
@@ -149,6 +158,38 @@ def _extract(iq, fs, offset_hz, bw_hz):
     if decim > 1:
         baseband = baseband[::decim]
     return baseband, fs / decim
+
+
+def _excerpt(chan, rate):
+    """One unclassified channel's tier 2 excerpt: its most
+    active contiguous span, bounded to EXCERPT_MAX_SAMPLES,
+    ci16-encoded for its SigMF pair. Activity is read in
+    quarter-second blocks, the same blocks the duty estimate
+    uses. Returns the feed-carried dict, or None for an empty
+    channel."""
+    from . import sigmf
+    n = len(chan)
+    if n == 0:
+        return None
+    if n <= EXCERPT_MAX_SAMPLES:
+        seg = chan
+    else:
+        block = max(1, int(rate * 0.25))
+        nblocks = n // block
+        energy = np.array([float(np.mean(np.abs(
+            chan[i * block:(i + 1) * block]) ** 2))
+            for i in range(nblocks)])
+        win = max(1, EXCERPT_MAX_SAMPLES // block)
+        if nblocks <= win:
+            start = 0
+        else:
+            sums = np.convolve(energy, np.ones(win), mode="valid")
+            start = int(np.argmax(sums)) * block
+        seg = chan[start:start + EXCERPT_MAX_SAMPLES]
+    data, peak = sigmf.data_bytes(seg)
+    return {"b64": base64.b64encode(data).decode("ascii"),
+            "rate": float(rate), "peak": peak,
+            "samples": int(len(seg))}
 
 
 def _classify(chan, rate):
@@ -418,6 +459,7 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
     found = found[:MAX_CANDIDATES]
     candidates = []
     snippets = 0
+    excerpts = 0
     extracted = 0
     for cand in found:
         offset = cand["freq_hz"] - center_hz
@@ -457,6 +499,18 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
                         entry["audio"] = (
                             audio[:n] * 32767).astype(np.int16).tolist()
                         snippets += 1
+                    if klass == "UNKNOWN" \
+                            and excerpts < EXCERPT_MAX_PER_WINDOW:
+                        # Extracted but unclassified: the channel
+                        # itself is the evidence a later classifier
+                        # or decoder will need. It rides the feed
+                        # as a tier 2 excerpt (0.10.0).
+                        exc = _excerpt(chan, rate)
+                        if exc is not None:
+                            exc["freq_hz"] = cand["freq_hz"]
+                            exc["bw_hz"] = cand["bw_hz"]
+                            entry["excerpt"] = exc
+                            excerpts += 1
             except Exception:
                 entry["modulation"] = "UNKNOWN"
         candidates.append(entry)

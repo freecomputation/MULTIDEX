@@ -13,6 +13,7 @@ import os
 import sqlite3
 
 from . import events as evmod
+from . import retention
 
 # The payload snippet class: payload evidence (the digital
 # voice desk's vocoder frame archives) is permanent Tier-0
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS baselines(
   PRIMARY KEY(scope, hour));
 CREATE TABLE IF NOT EXISTS snippets(
   id TEXT PRIMARY KEY, watch_id TEXT, desk TEXT, kind TEXT, path TEXT,
-  bytes INTEGER, shed INTEGER, t REAL);
+  bytes INTEGER, shed INTEGER, t REAL, sealed INTEGER);
 CREATE TABLE IF NOT EXISTS watch_meta(watch_id TEXT PRIMARY KEY, data_json TEXT);
 """
 
@@ -53,6 +54,15 @@ class Index:
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        # Homes written before 0.10.0 have a snippets table with
+        # no sealed column (the anomaly-doctrine flag retention
+        # accounts apart). Add it in place; rows already filed
+        # read as unsealed, which is what they are.
+        cols = [r[1] for r in self.db.execute(
+            "PRAGMA table_info(snippets)")]
+        if "sealed" not in cols:
+            self.db.execute("ALTER TABLE snippets ADD COLUMN "
+                            "sealed INTEGER DEFAULT 0")
         self.db.commit()
         self._log_handles = {}
 
@@ -216,9 +226,11 @@ class Index:
                         count += 1
         for row in snippets:
             self.db.execute(
-                "INSERT OR REPLACE INTO snippets VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO snippets VALUES "
+                "(?,?,?,?,?,?,?,?,?)",
                 (row["id"], row["watch_id"], row["desk"], row["kind"],
-                 row["path"], row["bytes"], row["shed"], row["t"]))
+                 row["path"], row["bytes"], row["shed"], row["t"],
+                 row.get("sealed") or 0))
         for event_id, links_json in links.items():
             self.db.execute("UPDATE events SET links_json=? WHERE id=?",
                             (links_json, event_id))
@@ -395,23 +407,83 @@ class Index:
             data={"snippet_refused": filename, "snippet_kind": kind,
                   "bytes": size, "reason": reason}))
 
+    def _shed_candidates(self, watch_id):
+        """Live rows that may shed, in one watch or (watch_id
+        None) across the whole home. Payload evidence (tier 0)
+        and sealed captures are never candidates: the ceiling
+        yields to both."""
+        if watch_id is None:
+            rows = self.db.execute(
+                "SELECT * FROM snippets WHERE shed=0 AND kind<>? "
+                "AND COALESCE(sealed,0)=0",
+                (PAYLOAD_KIND,)).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM snippets WHERE watch_id=? "
+                "AND shed=0 AND kind<>? "
+                "AND COALESCE(sealed,0)=0",
+                (watch_id, PAYLOAD_KIND)).fetchall()
+        return [dict(r) for r in rows]
+
+    def _event_for_snippet(self, watch_id, path):
+        """The event a snippet row is filed under, if one names
+        it: the raw material of the row's retention value."""
+        row = self.db.execute(
+            "SELECT emitter, grade, data_json FROM events WHERE "
+            "watch_id=? AND snippet=? ORDER BY t_start DESC "
+            "LIMIT 1", (watch_id, path)).fetchone()
+        if row is None:
+            return None
+        ev = dict(row)
+        ev["data"] = json.loads(ev.pop("data_json"))
+        return ev
+
+    def _pick_victim(self, watch_id):
+        """The next shed victim under the tier law (0.10.0):
+        the highest tier still holding candidates goes first -
+        bulk capture material before selective excerpts before
+        derived products - and inside a tier the least valuable
+        evidence goes first, value from the emitter's
+        uniqueness, the event's grade and classifier
+        uncertainty, oldest only as the tiebreak. watch_id None
+        reads the whole home."""
+        candidates = self._shed_candidates(watch_id)
+        if not candidates:
+            return None
+
+        def key(row):
+            ev = self._event_for_snippet(row["watch_id"],
+                                         row["path"])
+            count = None
+            if ev is not None and ev.get("emitter"):
+                dossier = self.dossier(ev["emitter"])
+                count = dossier["events_count"] if dossier else None
+            return (-retention.tier_of(row["kind"], row["path"]),
+                    retention.value_of(ev, count), row["t"])
+
+        return min(candidates, key=key)
+
     def keep_snippet(self, watch_id, watch_dir, desk, kind, filename,
                      data=None, ceiling_bytes=0, count_cap=None, t=None,
-                     source_path=None, home_wide=False):
+                     source_path=None, home_wide=False, sealed=False):
         """Write a snippet under quota and ceiling. Returns (path, shed).
 
         The payload is either bytes (`data`) or a file to copy in
         (`source_path`, for captures too large to hold in memory);
         the accounting is identical either way, from the byte size.
 
-        Sheds oldest snippets (satellite imagery last) when the
-        ceiling demands it; every shed is reported so the officer
-        can file it as an event. Payload-class snippets are the
-        one exemption: they are never shed, and a payload snippet
-        is filed even when nothing sheddable remains - the
-        ceiling yields to payload evidence, whose true size the
-        reception account states. With home_wide the ceiling is the
-        home's standing cap and the shed candidates are the oldest
+        Shedding follows the tier law (see multidex.retention):
+        when the ceiling demands room, victims are chosen tier
+        first (bulk capture material, then selective excerpts,
+        then derived products) and value-aware inside a tier;
+        every shed is reported so the officer can file it as an
+        event. A SigMF excerpt sheds as a pair or not at all.
+        Payload-class snippets and sealed captures are the
+        exemptions: they are never shed, and either is filed even
+        when nothing sheddable remains - the ceiling yields to
+        them, and the reception account states their bytes and
+        the exemption. With home_wide the ceiling is the
+        home's standing cap and the shed candidates are the
         filed receptions across the whole home, not only the
         filing watch's - the ceiling is a property of the
         installation, so its pressure is too. Returns (None, shed)
@@ -447,41 +519,50 @@ class Index:
         total = self._snippet_bytes_all() if home_wide \
             else self._snippet_bytes(watch_id)
         while total + size > ceiling_bytes:
-            if home_wide:
-                victim = self.db.execute(
-                    "SELECT * FROM snippets WHERE shed=0 "
-                    "AND kind<>? "
-                    "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
-                    (PAYLOAD_KIND,)).fetchone()
-            else:
-                victim = self.db.execute(
-                    "SELECT * FROM snippets WHERE watch_id=? "
-                    "AND shed=0 AND kind<>? "
-                    "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
-                    (watch_id, PAYLOAD_KIND)).fetchone()
+            victim = self._pick_victim(None if home_wide
+                                       else watch_id)
             if victim is None:
-                if kind == PAYLOAD_KIND:
+                if kind == PAYLOAD_KIND or sealed:
                     # Nothing sheddable remains and the ceiling
-                    # still does not fit it: payload evidence is
-                    # filed anyway. Frames not kept are lost;
-                    # the overage stands in the accounting.
+                    # still does not fit it: payload evidence and
+                    # sealed captures are filed anyway. Evidence
+                    # not kept is lost; the overage stands in
+                    # the accounting, and the accounts state the
+                    # exemption and its bytes.
                     break
                 self.db.commit()
                 self._record_snippet_refusal(
                     watch_id, desk, kind, filename, size,
                     "the snippet does not fit the disk ceiling", t)
                 return None, shed
-            victim_dir = os.path.join(self.watches_dir,
-                                      victim["watch_id"]) \
-                if home_wide else watch_dir
-            try:
-                os.remove(os.path.join(victim_dir, victim["path"]))
-            except OSError:
-                pass
-            self.db.execute("UPDATE snippets SET shed=1 WHERE id=?",
-                            (victim["id"],))
-            shed.append(dict(victim))
-            total -= victim["bytes"]
+            victims = [victim]
+            stem = retention.sigmf_stem(victim["path"])
+            if stem is not None:
+                # A SigMF excerpt is a pair: the data file and
+                # its metadata shed together or not at all, so
+                # the store never holds half an excerpt.
+                for suffix in (".sigmf-data", ".sigmf-meta"):
+                    mate = self.db.execute(
+                        "SELECT * FROM snippets WHERE watch_id=? "
+                        "AND shed=0 AND path=?",
+                        (victim["watch_id"], stem + suffix)
+                        ).fetchone()
+                    if mate is not None \
+                            and mate["id"] != victim["id"]:
+                        victims.append(dict(mate))
+            for one in victims:
+                victim_dir = os.path.join(self.watches_dir,
+                                          one["watch_id"]) \
+                    if home_wide else watch_dir
+                try:
+                    os.remove(os.path.join(victim_dir, one["path"]))
+                except OSError:
+                    pass
+                self.db.execute(
+                    "UPDATE snippets SET shed=1 WHERE id=?",
+                    (one["id"],))
+                shed.append(dict(one))
+                total -= one["bytes"]
         # Replacement retires the previous live row for this path
         # (unless the ceiling loop already shed it as a victim), so
         # the file about to be written is the row's only accounting.
@@ -501,9 +582,9 @@ class Index:
                 fh.write(data)
         from . import util as _util
         self.db.execute(
-            "INSERT INTO snippets VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO snippets VALUES (?,?,?,?,?,?,?,?,?)",
             (_util.new_id("sn"), watch_id, desk, kind, rel, size, 0,
-             t))
+             t, 1 if sealed else 0))
         self.db.commit()
         return rel, shed
 
@@ -511,11 +592,34 @@ class Index:
         """Every snippet row for a watch, kept and shed: the raw
         material of the reception account (the budget ledger is
         derived from these rows, so it survives an Index rebuild
-        exactly as the rows do)."""
+        exactly as the rows do). Each row carries its retention
+        tier, computed from its kind and filename."""
         rows = self.db.execute(
-            "SELECT desk, kind, path, bytes, shed, t FROM snippets "
-            "WHERE watch_id=? ORDER BY t ASC", (watch_id,)).fetchall()
-        return [dict(r) for r in rows]
+            "SELECT desk, kind, path, bytes, shed, t, sealed "
+            "FROM snippets WHERE watch_id=? ORDER BY t ASC",
+            (watch_id,)).fetchall()
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["tier"] = retention.tier_of(row["kind"],
+                                            row["path"])
+            out.append(row)
+        return out
+
+    def snippet_rows_all(self):
+        """Every snippet row in the home, kept and shed, with
+        watch ids and tiers: the home-wide retention account
+        doctor states."""
+        rows = self.db.execute(
+            "SELECT watch_id, desk, kind, path, bytes, shed, t, "
+            "sealed FROM snippets ORDER BY t ASC").fetchall()
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["tier"] = retention.tier_of(row["kind"],
+                                            row["path"])
+            out.append(row)
+        return out
 
     def _snippet_bytes(self, watch_id):
         row = self.db.execute(
@@ -542,10 +646,14 @@ class Index:
             "SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS b FROM "
             "snippets WHERE watch_id=? AND shed=0 AND kind=?",
             (watch_id, PAYLOAD_KIND)).fetchone()
+        tier_acct = retention.account(self.snippet_rows(watch_id))
         return {"kept_count": kept["n"], "kept_bytes": kept["b"],
                 "shed_count": shed["n"], "shed_bytes": shed["b"],
                 "payload_count": payload["n"],
-                "payload_bytes": payload["b"]}
+                "payload_bytes": payload["b"],
+                "by_tier": {t: tier_acct[t] for t in (0, 1, 2, 3)},
+                "sealed_count": tier_acct["sealed"]["count"],
+                "sealed_bytes": tier_acct["sealed"]["bytes"]}
 
     # --------------------------------------------------------- watch meta
     def set_watch_meta(self, watch_id, meta):
