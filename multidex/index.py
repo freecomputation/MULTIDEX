@@ -389,7 +389,7 @@ class Index:
 
     def keep_snippet(self, watch_id, watch_dir, desk, kind, filename,
                      data=None, ceiling_bytes=0, count_cap=None, t=None,
-                     source_path=None):
+                     source_path=None, home_wide=False):
         """Write a snippet under quota and ceiling. Returns (path, shed).
 
         The payload is either bytes (`data`) or a file to copy in
@@ -397,14 +397,19 @@ class Index:
         an LRPT pass recording is hundreds of megabytes); the
         accounting is identical either way, from the byte size.
 
-        Sheds oldest current-watch snippets (satellite imagery last)
-        when the ceiling demands it; every shed is reported so the
-        officer can file it as an event. Returns (None, shed) when the
-        snippet itself does not fit policy, and files a refusal event
-        saying why: a drop is a coverage fact, not silence. A filename
-        that already has a live row replaces it: the old row is
-        retired as shed, so one file on disk is exactly one live row
-        and the accounting cannot double-count it.
+        Sheds oldest snippets (satellite imagery last) when the
+        ceiling demands it; every shed is reported so the officer
+        can file it as an event. With home_wide the ceiling is the
+        home's standing cap and the shed candidates are the oldest
+        filed receptions across the whole home, not only the
+        filing watch's - the ceiling is a property of the
+        installation, so its pressure is too. Returns (None, shed)
+        when the snippet itself does not fit policy, and files a
+        refusal event saying why: a drop is a coverage fact, not
+        silence. A filename that already has a live row replaces
+        it: the old row is retired as shed, so one file on disk is
+        exactly one live row and the accounting cannot double-count
+        it.
         """
         import time as _time
         if t is None:
@@ -428,20 +433,31 @@ class Index:
                     watch_id, desk, kind, filename, size,
                     "the per-desk snippet count cap is reached", t)
                 return None, shed
-        total = self._snippet_bytes(watch_id)
+        total = self._snippet_bytes_all() if home_wide \
+            else self._snippet_bytes(watch_id)
         while total + size > ceiling_bytes:
-            victim = self.db.execute(
-                "SELECT * FROM snippets WHERE watch_id=? AND shed=0 "
-                "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
-                (watch_id,)).fetchone()
+            if home_wide:
+                victim = self.db.execute(
+                    "SELECT * FROM snippets WHERE shed=0 "
+                    "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
+                    ()).fetchone()
+            else:
+                victim = self.db.execute(
+                    "SELECT * FROM snippets WHERE watch_id=? "
+                    "AND shed=0 "
+                    "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
+                    (watch_id,)).fetchone()
             if victim is None:
                 self.db.commit()
                 self._record_snippet_refusal(
                     watch_id, desk, kind, filename, size,
                     "the snippet does not fit the disk ceiling", t)
                 return None, shed
+            victim_dir = os.path.join(self.watches_dir,
+                                      victim["watch_id"]) \
+                if home_wide else watch_dir
             try:
-                os.remove(os.path.join(watch_dir, victim["path"]))
+                os.remove(os.path.join(victim_dir, victim["path"]))
             except OSError:
                 pass
             self.db.execute("UPDATE snippets SET shed=1 WHERE id=?",
@@ -487,6 +503,14 @@ class Index:
         row = self.db.execute(
             "SELECT COALESCE(SUM(bytes),0) AS b FROM snippets "
             "WHERE watch_id=? AND shed=0", (watch_id,)).fetchone()
+        return row["b"]
+
+    def _snippet_bytes_all(self):
+        """Live snippet bytes across the whole home: the standing
+        ceiling's own accounting, every watch together."""
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(bytes),0) AS b FROM snippets "
+            "WHERE shed=0").fetchone()
         return row["b"]
 
     def snippet_accounting(self, watch_id):

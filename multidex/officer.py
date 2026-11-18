@@ -261,9 +261,13 @@ class WatchRunner:
         self._tx_results = []
         self._tx_lock = threading.Lock()
         self._tx_errors = 0
-        # Reception containment: the muster budget and the live
-        # ledger of held snippet bytes it is accounted against.
-        self.budget = None
+        # Reception containment: the home's standing allocation
+        # ledger, this watch's grants against it, and the live
+        # ledger of held snippet bytes they are accounted against.
+        self.ledger = None
+        self.grants = {}
+        self._grant_statements = []
+        self._lrpt_pending = set()
         self._bill_cls = {}
         self._held = {}
         self._held_by_desk = {}
@@ -346,6 +350,17 @@ class WatchRunner:
                     and util.pid_alive(state.get("pid")):
                 return folder, state.get("pid")
         return None
+
+    def _watch_is_standing(self, watch_id):
+        """True when a watch's officer process is alive: its
+        state file is incomplete and the pid it recorded still
+        exists. The allocation ledger's orphan reclamation reads
+        standing-ness through this, never through the pointer."""
+        state = util.read_json(os.path.join(
+            self.home, "watches", watch_id, "state.json"),
+            default=None)
+        return bool(state) and not state.get("complete") \
+            and util.pid_alive(state.get("pid"))
 
     def _acquire_lock(self):
         """Take the home's watch lock without blocking, or None.
@@ -462,15 +477,36 @@ class WatchRunner:
         self._start_lrpt_decode()
         bill = build_bill(profile, start, sats)
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
-        # Reception containment is computed at muster, from the
-        # profile's ceiling and this bill, before the first dwell:
-        # if the worst case cannot fit, the budget has already
-        # degraded coherently and its statements file below.
-        self.budget = budget.build_reception_budget(profile, bill)
+        # Reception containment: this watch's allocations are
+        # grants against the home's standing allocation ledger,
+        # taken at muster before the first dwell. Grants a dead
+        # watch left open are reclaimed first, standing satellite
+        # reservations are refreshed from the same ephemeris the
+        # bill was built from, and the bill is then granted
+        # against the pool's current state - shrunk in the stated
+        # order, with the statements filed below, when the pool
+        # cannot carry the worst case.
+        self.ledger = budget.AllocationLedger.load(self.home)
+        orphan_statements = budget.close_orphaned_grants(
+            self.ledger, self._watch_is_standing, start)
+        budget.refresh_reserves(self.ledger, profile, sats, start)
+        pool_before = self.ledger.pool()
+        self.grants, self._grant_statements, pool_after = \
+            budget.request_watch_grants(
+                self.ledger, profile, watch_id, bill, start)
         self._bill_cls = {i["id"]: i["cls"] for i in bill}
         util.write_json(os.path.join(self.watch_dir, "budget.json"),
-                        {"summary": self.budget.summary(),
-                         "allocations": self.budget.allocations})
+                        {"snapshot_of": "the standing allocation "
+                                        "ledger at muster; the "
+                                        "ledger is the system of "
+                                        "record, this file is a "
+                                        "view of it",
+                         "pool": pool_after,
+                         "grants": [self.grants[i["id"]]
+                                    for i in bill
+                                    if i["id"] in self.grants],
+                         "statements": self._grant_statements})
+        slice0 = budget.watch_slice(self.ledger, watch_id)
         meta = {
             "watch_id": watch_id, "start": start,
             "planned_end": start + profile["watch"]["hours"] * 3600,
@@ -484,7 +520,13 @@ class WatchRunner:
             "ended_early": False, "end_reason": None, "resumed": False,
             "source_note": source_note,
             "time_scale": self._scale,
-            "reception_budget": self.budget.summary(),
+            "reception_pool": pool_after,
+            "reception_grants": {
+                "granted_bytes": slice0["granted_bytes"],
+                "satellite_bytes": slice0["satellite_bytes"],
+                "by_class": {c: v["granted"] for c, v in
+                             slice0["by_class"].items()},
+                "statements": list(self._grant_statements)},
         }
         self.meta = meta
         self.index.set_watch_meta(watch_id, meta)
@@ -502,25 +544,35 @@ class WatchRunner:
             content="muster passed; watch stood with %d bill items"
                     % len(bill), grade="CONFIRMED",
             data=muster_data))
-        b = self.budget
         self._file(make_event(
             watch_id, "officer", "system", start, start,
             grade="CONFIRMED",
-            content="reception budget: ceiling %d bytes; the "
-                    "bill's worst case is %d bytes, of which the "
-                    "satellite reserve is %d bytes, leaving a "
-                    "free margin of %d bytes"
-                    % (b.ceiling_bytes, b.total_bytes,
-                       b.satellite_reserve_bytes,
-                       b.free_margin_bytes),
-            data={"reception_budget": b.summary()}))
-        for statement in b.degraded:
+            content="reception allocations: the standing pool "
+                    "(cap %d bytes; %d consumed and %d reserved "
+                    "when this watch mustered) granted this watch "
+                    "%d bytes across %d receptions, %d of it "
+                    "satellite passes, leaving %d bytes free"
+                    % (pool_after["cap_bytes"],
+                       pool_before["consumed_bytes"],
+                       pool_before["reserved_bytes"],
+                       slice0["granted_bytes"], len(bill),
+                       slice0["satellite_bytes"],
+                       pool_after["free_bytes"]),
+            data={"reception_pool": pool_after,
+                  "reception_grants": meta["reception_grants"]}))
+        for statement in orphan_statements:
             self._file(make_event(
                 watch_id, "officer", "system", start, start,
                 grade="CONFIRMED",
-                content="reception budget degraded at muster: %s"
+                content="reception allocations: %s" % statement,
+                data={"reception_orphans_released": statement}))
+        for statement in self._grant_statements:
+            self._file(make_event(
+                watch_id, "officer", "system", start, start,
+                grade="CONFIRMED",
+                content="reception allocation reduced at muster: %s"
                         % statement,
-                data={"reception_budget_degraded": statement}))
+                data={"reception_allocation_reduced": statement}))
         for name in sorted(SPECS):
             reason = self._desk_benched_reason(name, source)
             if reason:
@@ -589,15 +641,32 @@ class WatchRunner:
         self.exploit = Exploit(self.index, profile)
         bill = util.read_json(os.path.join(self.watch_dir, "bill.json"),
                               default=[])
-        # The reception budget is recomputed from the same bill
-        # and profile, and the held ledger re-derived from the
-        # snippet store: a resumed watch accounts exactly what
-        # the store holds, under the same allocations.
-        self.budget = budget.build_reception_budget(profile, bill)
         self._bill_cls = {i["id"]: i["cls"] for i in bill}
         self._rebuild_held()
-        if "reception_budget" not in meta:
-            meta["reception_budget"] = self.budget.summary()
+        # Reception grants are reconciled, never recomputed from
+        # scratch and never assumed to have survived: the resumed
+        # watch re-derives them from the standing ledger, its
+        # bill and the snippet store, and the reconciliation
+        # statements file with the resume event below - what
+        # changed is said, in the open.
+        self.ledger = budget.AllocationLedger.load(self.home)
+        resume_t = meta["start"] + state.get("elapsed_s", 0)
+        self.grants, self._grant_statements = \
+            budget.reconcile_watch(self.ledger, profile, watch_id,
+                                   bill, self.index, resume_t)
+        if "reception_pool" not in meta:
+            meta["reception_pool"] = self.ledger.pool()
+        util.write_json(os.path.join(self.watch_dir, "budget.json"),
+                        {"snapshot_of": "the standing allocation "
+                                        "ledger at resume; the "
+                                        "ledger is the system of "
+                                        "record, this file is a "
+                                        "view of it",
+                         "pool": self.ledger.pool(),
+                         "grants": [self.grants[i["id"]]
+                                    for i in bill
+                                    if i["id"] in self.grants],
+                         "statements": self._grant_statements})
         self._start_lrpt_decode()
         source = self._source_for_meta(meta, meta["start"])
         self.source_note = meta.get("source_note")
@@ -638,6 +707,14 @@ class WatchRunner:
             content="watch resumed from on-disk state at bill item %d"
                     % state.get("next_index", 0), grade="CONFIRMED",
             data={"resumed": True}))
+        budget.refresh_reserves(self.ledger, profile, sats, resume_t)
+        for statement in self._grant_statements:
+            self._file(make_event(
+                watch_id, "officer", "system", resume_t, resume_t,
+                grade="CONFIRMED",
+                content="reception grant reconciliation on "
+                        "resume: %s" % statement,
+                data={"reception_reconciled": statement}))
         # The bench set is re-filed for the resumed watch, from the
         # same one computation the muster uses.
         for name in sorted(SPECS):
@@ -710,12 +787,16 @@ class WatchRunner:
         self._held_total = max(0, self._held_total - victim["bytes"])
         self._shed_total += victim["bytes"]
 
-    def _budget_state(self):
-        """The live budget block state.json carries: allocated
-        versus consumed, per class, with the satellite reserve
-        broken out - the same numbers the Watch Report's
-        reception account renders at stand-down."""
-        b = self.budget
+    def _pool_state(self):
+        """The standing-pool block state.json carries: the pool's
+        own figures (cap, consumed, reserved, free) with this
+        watch's slice beside them, per class - the same numbers
+        the Watch Report's reception account renders at
+        stand-down. The allocated/consumed keys the dashboard
+        has always read now carry the pool's granted and
+        consumed, because the pool is what is standing."""
+        pool = self.ledger.pool()
+        sl = budget.watch_slice(self.ledger, self.watch_id)
         consumed_by_class = {}
         for bid, n in self._held.items():
             cls = self._bill_cls.get(bid)
@@ -723,21 +804,45 @@ class WatchRunner:
                 consumed_by_class[cls] = \
                     consumed_by_class.get(cls, 0) + n
         by_class = {}
-        for cls, alloc in sorted(b.summary()["by_class"].items()):
+        for cls, gslice in sorted(sl["by_class"].items()):
             by_class[cls] = {
-                "allocated": alloc["bytes"],
+                "allocated": gslice["granted"],
                 "consumed": consumed_by_class.get(cls, 0)}
         return {
-            "ceiling_bytes": b.ceiling_bytes,
-            "allocated_bytes": b.total_bytes,
-            "consumed_bytes": self._held_total,
+            "cap_bytes": pool["cap_bytes"],
+            "ceiling_bytes": pool["cap_bytes"],
+            "allocated_bytes": pool["granted_bytes"],
+            "granted_bytes": pool["granted_bytes"],
+            "reserved_bytes": pool["reserved_bytes"],
+            "consumed_bytes": pool["consumed_bytes"],
+            "free_bytes": pool["free_bytes"],
             "shed_bytes": self._shed_total,
-            "satellite_reserve_bytes": b.satellite_reserve_bytes,
+            "satellite_reserve_bytes":
+                pool["satellite_reserve_bytes"],
             "satellite_consumed_bytes":
-                self._held_by_desk.get("satellite", 0),
+                pool["satellite_consumed_bytes"],
+            "watch_granted_bytes": sl["granted_bytes"],
+            "watch_consumed_bytes": self._held_total,
+            "watch_released_bytes": sl["released_bytes"],
             "by_class": by_class,
-            "degraded": bool(b.degraded),
+            "degraded": bool(self._grant_statements),
         }
+
+    def _close_item_grant(self, item, now):
+        """Release a finished dwell's or pass's unspent grant
+        back to the standing pool. A pass whose LRPT decode is
+        still pending keeps its grant until the decode files:
+        the imagery is part of that pass's reception."""
+        if self.ledger is None:
+            return
+        if item["id"] in self._lrpt_pending:
+            return
+        grant = self.grants.get(item["id"])
+        if grant is None or grant.get("status") != "open":
+            return
+        reason = "pass ended" if item.get("kind") == "pass" \
+            else "dwell ended"
+        self.ledger.close(grant["id"], now, reason)
 
     # ---------------------------------------------------------------- run
     def _run_bill(self, bill, from_index, watch_start,
@@ -804,6 +909,10 @@ class WatchRunner:
                                                   exec_cost)
             else:
                 end_position = planned_start + item["dur"]
+            # The dwell or pass has ended: its grant's unspent
+            # remainder releases back to the standing pool here,
+            # not at stand-down.
+            self._close_item_grant(item, end_position)
             position = end_position
             self._save_state(idx + 1, item, watch_start,
                              elapsed_override=end_position - watch_start)
@@ -864,8 +973,8 @@ class WatchRunner:
             "heartbeat_s": elapsed,
             "executing": executing,
         }
-        if self.budget is not None:
-            state["budget"] = self._budget_state()
+        if self.ledger is not None:
+            state["budget"] = self._pool_state()
         util.write_json(os.path.join(self.watch_dir, "state.json"), state)
 
     def _execute(self, item, watch_start, actual_start=None):
@@ -894,14 +1003,15 @@ class WatchRunner:
             pdesk = "iss" if "iss" in item["desks"] else "satellite"
             vfo = {"desk": pdesk, "freq_hz": item["center_hz"],
                    "bw_hz": 150e3, "pass": item.get("pass")}
-            if pdesk == "satellite" and self.budget is not None \
+            if pdesk == "satellite" and self.ledger is not None \
                     and budget.downlink_kind(
                         (item.get("pass") or {}).get("sat")) == "lrpt":
                 # The LRPT capture's byte cap is this item's
-                # reception allocation minus the decoded image's
-                # allowance: the capture stops at the allocation,
+                # reception grant minus the decoded image's
+                # allowance: the capture stops at the grant,
                 # inside the tuner, not at the disk ceiling.
-                alloc = self.budget.allocation_for(item["id"])
+                grant = self.grants.get(item["id"])
+                alloc = grant["bytes"] if grant else None
                 if alloc is not None:
                     # Normally the cap is the allocation minus the
                     # decoded image's allowance. A reservation
@@ -1089,14 +1199,15 @@ class WatchRunner:
             cap = self.profile["snippets"]["iq_max_per_watch"]
         try:
             # Reception containment, enforced at filing: a bill
-            # item's kept evidence may not pass the allocation
-            # computed for it at muster. A payload that would cross
-            # the boundary is refused here and the refusal is
-            # logged by the Index with the allocation named. The
+            # item's kept evidence may not pass the grant it was
+            # given at muster. A payload that would cross the
+            # boundary is refused here and the refusal is
+            # logged by the Index with the grant named. The
             # capture side truncates at the same boundary, so this
             # is the backstop, not the mechanism.
-            alloc = self.budget.allocation_for(bill_id) \
-                if self.budget is not None else None
+            grant = self.grants.get(bill_id) \
+                if self.ledger is not None else None
+            alloc = grant["bytes"] if grant else None
             if alloc is not None and size > 0 \
                     and self._held.get(bill_id, 0) + size > alloc:
                 self.index._record_snippet_refusal(
@@ -1110,7 +1221,7 @@ class WatchRunner:
             rel, shed = self.index.keep_snippet(
                 self.watch_id, self.watch_dir, desk, payload["kind"],
                 filename, data, ceiling, count_cap=cap,
-                t=ev["t_start"], source_path=src)
+                t=ev["t_start"], source_path=src, home_wide=True)
         finally:
             if src is not None and os.path.exists(src):
                 try:
@@ -1118,7 +1229,18 @@ class WatchRunner:
                 except OSError:
                     pass
         for victim in shed:
-            self._held_shed(victim)
+            # Shedding reads the whole home: a victim may be
+            # another watch's reception. Its shed posts against
+            # the grant it was filed under, naming it; only this
+            # watch's own victims move this watch's held ledger.
+            vwatch = victim.get("watch_id") or self.watch_id
+            vbid = budget.bill_id_of_snippet_path(victim["path"])
+            vgrant = None
+            if self.ledger is not None:
+                vgrant = self.ledger.post_shed(
+                    vwatch, vbid, victim["bytes"])
+            if vwatch == self.watch_id:
+                self._held_shed(victim)
             self.index.add_event(make_event(
                 self.watch_id, "officer", "system", ev["t_start"],
                 ev["t_end"], grade="CONFIRMED",
@@ -1126,12 +1248,17 @@ class WatchRunner:
                         % victim["path"],
                 data={"shed": victim["path"],
                       "desk": victim["desk"],
-                      "bill_id": budget.bill_id_of_snippet_path(
-                          victim["path"]),
+                      "bill_id": vbid,
+                      "watch_id": vwatch,
+                      "grant_id": vgrant["id"] if vgrant else None,
                       "bytes": victim["bytes"]}))
         if rel:
             ev["snippet"] = rel
             self._held_add(bill_id, desk, size)
+            if self.ledger is not None:
+                grant = self.grants.get(bill_id)
+                if grant is not None:
+                    self.ledger.consume(grant["id"], size)
 
     # -------------------------------------------------- transcription
     def _start_transcription(self):
@@ -1257,6 +1384,10 @@ class WatchRunner:
         rel = ev.get("snippet")
         if not rel:
             return
+        # The pass's grant stays open until the decode files:
+        # the imagery is part of this pass's reception, charged
+        # against the same grant as the IQ.
+        self._lrpt_pending.add(bill_id)
         self._lrpt_queue.submit({
             "iq_path": os.path.join(self.watch_dir, rel),
             "iq_rate": ev["data"].get("iq_rate"),
@@ -1274,6 +1405,7 @@ class WatchRunner:
         with self._lrpt_lock:
             results, self._lrpt_results = self._lrpt_results, []
         for job, png, info in results:
+            self._lrpt_pending.discard(job["bill_id"])
             if png is not None:
                 ev = make_event(
                     self.watch_id, "satellite", "imagery",
@@ -1308,6 +1440,16 @@ class WatchRunner:
                           "bill_id": job["bill_id"],
                           "synthetic": job["synthetic"],
                           "decode_reason": info}))
+            # The decode has filed, one way or the other: the
+            # pass's reception is complete, and its grant's
+            # unspent remainder releases now.
+            if self.ledger is not None:
+                grant = self.grants.get(job["bill_id"])
+                if grant is not None \
+                        and grant.get("status") == "open":
+                    self.ledger.close(
+                        grant["id"], job["t1"],
+                        "pass ended; its decode has filed")
 
     def _stop_lrpt_decode(self):
         if self._lrpt_worker is not None:
@@ -1357,7 +1499,33 @@ class WatchRunner:
                 "start": ev["t_start"], "dur": 240,
                 "center_hz": ev["freq_hz"], "bw_hz": bw,
                 "desks": ["sweep"], "pass": None}
+            if self.ledger is not None:
+                # An interrupt is an unplanned reception: it
+                # takes a mid-watch grant from the standing pool
+                # like any other, shrunk or refused with the
+                # reason filed when the pool cannot carry it.
+                grant, statement = budget.request_item_grant(
+                    self.ledger, self.profile, self.watch_id,
+                    interrupt, ev["t_start"])
+                if grant is None:
+                    self._file(make_event(
+                        self.watch_id, "officer", "system",
+                        ev["t_start"], ev["t_start"], grade="CONFIRMED",
+                        content="interrupt not flown: %s" % statement,
+                        data={"reception_grant_refused": statement,
+                              "bill_id": interrupt["id"]}))
+                    return
+                self.grants[interrupt["id"]] = grant
+                if statement:
+                    self._file(make_event(
+                        self.watch_id, "officer", "system",
+                        ev["t_start"], ev["t_start"], grade="CONFIRMED",
+                        content="reception allocation: %s" % statement,
+                        data={"reception_grant_shrunk": statement,
+                              "bill_id": interrupt["id"]}))
             self._execute(interrupt, watch_start)
+            self._close_item_grant(interrupt,
+                                   ev["t_start"] + interrupt["dur"])
             return
 
     # ----------------------------------------------------------- stand down
@@ -1371,6 +1539,19 @@ class WatchRunner:
         self.meta["end"] = end
         self._stop_transcription()
         self._stop_lrpt_decode()
+        # Stand-down releases every grant this watch still
+        # holds: unspent room returns to the standing pool the
+        # moment the watch ends, however it ends, and the filed
+        # receptions stay accounted as consumed in the ledger's
+        # history. The release lands before the Watch Report
+        # renders, so the report's reception account is final.
+        if self.ledger is not None:
+            self.ledger.release_watch(
+                self.watch_id, end,
+                "watch ended early: %s" % end_reason if end_reason
+                else "watch stood down",
+                status="cancelled" if end_reason == "operator stop"
+                else "closed")
         self.index.set_watch_meta(self.watch_id, self.meta)
         util.write_json(os.path.join(self.watch_dir, "watch.json"),
                         self.meta)
@@ -1407,8 +1588,8 @@ class WatchRunner:
             "heartbeat_s": end - watch_start,
             "executing": None,
         }
-        if self.budget is not None:
-            state["budget"] = self._budget_state()
+        if self.ledger is not None:
+            state["budget"] = self._pool_state()
         util.write_json(os.path.join(self.watch_dir, "state.json"),
                         state)
         util.write_json(os.path.join(self.home, "current_watch"), None)

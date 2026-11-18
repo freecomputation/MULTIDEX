@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.4.1.
+Version 0.4.2.
 
 ## The verbs
 
@@ -126,32 +126,55 @@ Five organs, one tuner.
   logging every shed. Snippet filenames carry the watch id and the
   bill item id, so two dwells can never produce the same path; a
   snippet refused by a cap or the ceiling files a refusal event
-  with the reason. Since 0.4.1 the snippet store sits inside a
-  reception budget: at bill build, every planned reception
+  with the reason. Since 0.4.2 the snippet store sits inside a
+  standing allocation pool owned by the home, not by any
+  watch: an allocation ledger lives beside the Index as
+  durable data, read the same by every watch, by `doctor`, by
+  status and by the dashboard, and never reset by a software
+  update - a missing ledger reads as empty, and unknown fields
+  in it are ignored. At bill build, every planned reception
   carries a computed allocation - tuner seconds and worst-case
   bytes from its capture rate and duration, satellite passes
   from their predicted AOS-to-LOS windows (an APT pass reserves
   its stored-audio rate of 22,050 bytes per second of window
   plus an image allowance; an LRPT pass reserves 2,048,000
-  bytes per second of window plus an image allowance). At
-  muster the officer sums the bill into a ReceptionBudget
-  against the profile's disk ceiling - per-class and per-desk
-  allocations, the satellite reserve, and a free margin (the
-  degradation below defends at least five percent of the
-  ceiling as margin) - and states it. If the worst case
-  cannot fit, muster degrades the budget in a stated order
-  (event-allowance classes first, satellite reservations last)
-  and says so in the muster events, rather than discovering the
-  wall mid-watch. During the watch, kept evidence is accounted
-  live against the allocations in the watch state, a capture
-  that reaches its allocation stops at the boundary with the
-  truncation stated in its event (the LRPT IQ capture is the
-  first citizen of this rule), and shedding still runs oldest
-  first, each shed logged with the desk, bill item, and bytes it
-  came from. The Watch Report carries the reception account -
-  allocated against kept against shed, per class - beside the
-  coverage account, and `doctor` reports the budget's shape for
-  the profile before any watch stands. Rebuilding the database
+  bytes per second of window plus an image allowance).
+  Satellite passes hold standing reservations in the ledger,
+  computed from the ephemeris for the windows ahead whether or
+  not a watch is standing, and a reservation whose window
+  passes unclaimed expires and releases on its own. At muster
+  the watch takes grants against the pool - the profile's disk
+  ceiling held as a standing cap on the home, read against
+  the home's actual disk state - adopting the reservations
+  its passes match, sized from actual predicted windows and
+  the pool's state at grant time, with a free margin of the
+  pool never granted. If the worst case cannot fit, grants
+  shrink in a stated order (event-allowance classes first,
+  satellite passes last) and the reduction is stated in the
+  muster events, rather than discovered mid-watch; an
+  unplanned reception mid-watch takes its own grant the same
+  way, shrunk or refused with the reason filed. During the
+  watch, kept evidence is consumed against its grant, a
+  capture that reaches its grant stops at the boundary with
+  the truncation stated in its event (the LRPT IQ capture is
+  the first citizen of this rule), and a grant's unspent
+  remainder releases back to the pool when its dwell or pass
+  ends. Cancelling or stopping a watch releases all of its
+  unspent grants at once, while its filed receptions stay
+  accounted as consumed in the ledger's history; a resumed
+  watch reconciles its grants against the ledger and the
+  snippet store rather than assuming they survived, and files
+  what changed. Shedding under the ceiling reads the whole
+  home - the oldest filed receptions anywhere are the
+  candidates, satellite imagery last - and every shed names
+  the grant it was filed under. The Watch Report carries the
+  reception account - this watch's slice of the standing
+  ledger: granted against kept against released against shed,
+  per class - beside the coverage account, and `doctor` and
+  status report the pool's own figures (cap, consumed,
+  reserved, free) whether or not a watch stands. `budget.json`
+  in a watch directory is a snapshot of the ledger at muster,
+  never the system of record. Rebuilding the database
   from the logs preserves
   the snippet accounting, the event links, and the watch metadata,
   which the logs themselves do not record. Whether a desk is

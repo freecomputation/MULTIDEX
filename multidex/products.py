@@ -305,17 +305,37 @@ def render_report(index, watch_id):
                  "bound decoder heard on the rotation's HF "
                  "windows and claims nothing about HFDL traffic "
                  "beyond them.")
-    rb = meta.get("reception_budget")
-    if rb:
-        from . import budget as _budget_mod
-        L.append("Reception account: at muster the bill's worst "
-                 "case was allocated %d bytes against a disk "
-                 "ceiling of %d bytes - %d bytes reserved for "
-                 "satellite passes, %d bytes of free margin held "
-                 "back." % (rb["total_bytes"], rb["ceiling_bytes"],
-                            rb["satellite_reserve_bytes"],
-                            rb["free_margin_bytes"]))
-        cls_of = {b["id"]: b["cls"] for b in meta.get("bill", [])}
+    # The reception account is this watch's slice of the home's
+    # standing allocation ledger: the grants it held, what they
+    # consumed, what they released unspent, what was shed. The
+    # ledger is the system of record; the meta's opening pool
+    # summary names the standing cap the slice was drawn from.
+    from . import budget as _budget_mod
+    _slice = None
+    try:
+        _ledger = _budget_mod.AllocationLedger.load(index.home)
+        _slice = _budget_mod.watch_slice(_ledger, watch_id)
+        if not _slice["grants"]:
+            _slice = None
+    except Exception:
+        _slice = None
+    if _slice is not None:
+        _pool0 = meta.get("reception_pool") or {}
+        _cap = _pool0.get("cap_bytes") or int(
+            meta.get("disk_ceiling_gb", 20) * 1e9)
+        L.append("Reception account: this watch's slice of the "
+                 "standing allocation pool (standing cap %d "
+                 "bytes). The watch was granted %d bytes across "
+                 "%d receptions - %d bytes of it satellite "
+                 "passes; it kept %d bytes of evidence, released "
+                 "%d bytes unspent back to the pool, and shed "
+                 "%d bytes under the ceiling."
+                 % (_cap, _slice["granted_bytes"],
+                    len(_slice["grants"]), _slice["satellite_bytes"],
+                    _slice["consumed_bytes"],
+                    _slice["released_bytes"], _slice["shed_bytes"]))
+        cls_of = {g["bill_id"]: g["cls"] for g in _slice["grants"]
+                  if g.get("bill_id")}
         consumed, shed_bytes = {}, {}
         for row in index.snippet_rows(watch_id):
             if not row["path"]:
@@ -328,14 +348,51 @@ def render_report(index, watch_id):
                 shed_bytes[cls] = shed_bytes.get(cls, 0) + row["bytes"]
             else:
                 consumed[cls] = consumed.get(cls, 0) + row["bytes"]
-        for cls in sorted(rb["by_class"]):
-            L.append("Class %s receptions: allocated %d bytes; "
-                     "%d bytes of evidence kept; %d bytes shed."
-                     % (cls, rb["by_class"][cls]["bytes"],
-                        consumed.get(cls, 0), shed_bytes.get(cls, 0)))
-        for statement in rb.get("degraded") or []:
-            L.append("The reception budget was degraded at "
+        for cls in sorted(_slice["by_class"]):
+            g = _slice["by_class"][cls]
+            L.append("Class %s receptions: granted %d bytes; "
+                     "%d bytes of evidence kept; %d bytes "
+                     "released unspent; %d bytes shed."
+                     % (cls, g["granted"],
+                        consumed.get(cls, 0), g["released"],
+                        shed_bytes.get(cls, 0)))
+        for statement in (meta.get("reception_grants") or {}).get(
+                "statements") or []:
+            L.append("The watch's grants were reduced at "
                      "muster: %s" % statement)
+    else:
+        rb = meta.get("reception_budget")
+        if rb:
+            L.append("Reception account: at muster the bill's worst "
+                     "case was allocated %d bytes against a disk "
+                     "ceiling of %d bytes - %d bytes reserved for "
+                     "satellite passes, %d bytes of free margin held "
+                     "back." % (rb["total_bytes"], rb["ceiling_bytes"],
+                                rb["satellite_reserve_bytes"],
+                                rb["free_margin_bytes"]))
+            cls_of = {b["id"]: b["cls"] for b in meta.get("bill", [])}
+            consumed, shed_bytes = {}, {}
+            for row in index.snippet_rows(watch_id):
+                if not row["path"]:
+                    continue
+                cls = cls_of.get(
+                    _budget_mod.bill_id_of_snippet_path(row["path"]))
+                if cls is None:
+                    continue
+                if row["shed"]:
+                    shed_bytes[cls] = shed_bytes.get(cls, 0) \
+                        + row["bytes"]
+                else:
+                    consumed[cls] = consumed.get(cls, 0) + row["bytes"]
+            for cls in sorted(rb["by_class"]):
+                L.append("Class %s receptions: allocated %d bytes; "
+                         "%d bytes of evidence kept; %d bytes shed."
+                         % (cls, rb["by_class"][cls]["bytes"],
+                            consumed.get(cls, 0),
+                            shed_bytes.get(cls, 0)))
+            for statement in rb.get("degraded") or []:
+                L.append("The reception budget was degraded at "
+                         "muster: %s" % statement)
     L.append("")
     L.append("## 3. Day picture, service by service")
     for desk in sorted(picture["by_desk"]):
@@ -641,12 +698,18 @@ def status_text(home):
         # No running watch. If the pointer names a completed watch,
         # say which one finished; a stale pointer to a vanished
         # folder is reported as no watch, never as a phantom id.
+        # The standing pool is reported either way: it is a
+        # property of the home, not of a run.
+        pool_line = _pool_line(home)
         if pointer:
             state = _watch_state(home, pointer)
             if state and state.get("complete"):
-                return ("No watch is running. Last watch %s completed."
-                        % pointer)
-        return "No watch is running."
+                text = ("No watch is running. Last watch %s "
+                        "completed." % pointer)
+                return text + ("\n" + pool_line if pool_line
+                               else "")
+        return "No watch is running." + (
+            "\n" + pool_line if pool_line else "")
     index = Index(home)
     try:
         state = util.read_json(os.path.join(
@@ -672,7 +735,19 @@ def status_text(home):
     if meta.get("source_note"):
         lines.append("Source note: %s" % meta["source_note"])
     bstate = state.get("budget")
-    if bstate:
+    if bstate and bstate.get("cap_bytes") is not None:
+        lines.append("Reception pool: standing cap %d bytes; "
+                     "%d consumed, %d reserved in open grants, "
+                     "%d free. This watch holds %d granted bytes "
+                     "(%d consumed, %d shed)."
+                     % (bstate["cap_bytes"],
+                        bstate["consumed_bytes"],
+                        bstate["reserved_bytes"],
+                        bstate["free_bytes"] or 0,
+                        bstate["watch_granted_bytes"],
+                        bstate["watch_consumed_bytes"],
+                        bstate["shed_bytes"]))
+    elif bstate:
         lines.append("Reception budget: %d of %d allocated bytes "
                      "consumed, %d shed; satellite reserve %d "
                      "bytes (%d consumed)"
@@ -682,3 +757,22 @@ def status_text(home):
                         bstate["satellite_reserve_bytes"],
                         bstate["satellite_consumed_bytes"]))
     return "\n".join(lines)
+
+
+def _pool_line(home):
+    """The standing allocation pool as one status line, read
+    from the home's ledger: the pool stands whether or not a
+    watch does. None when the home has no ledger yet, or the
+    ledger has never been told the standing cap."""
+    try:
+        from . import budget as _budget_mod
+        pool = _budget_mod.AllocationLedger.load(home).pool()
+    except Exception:
+        return None
+    if pool["cap_bytes"] is None:
+        return None
+    return ("Reception pool: standing cap %d bytes; %d consumed, "
+            "%d reserved in %d open grants, %d free."
+            % (pool["cap_bytes"], pool["consumed_bytes"],
+               pool["reserved_bytes"], pool["open_grants"],
+               pool["free_bytes"] or 0))
