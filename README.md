@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.10.0.
+Version 0.11.0.
 
 ## The verbs
 
@@ -259,6 +259,90 @@ and the Watch Report state the pool by tier - held per tier, shed
 per tier, sealed apart - and a watch's slice of the ledger shows
 its tier composition.
 
+## The probe desk
+
+The probe desk stares at the unexplained. At muster it computes its
+candidate list from the Index: emitter dossiers graded UNRESOLVED
+with repeat observations, and frequency clusters of hearings that
+carry no dossier, ranked by recurrence first, then by classifier
+uncertainty, then by mean signal strength. A cluster any desk has
+decoded is explained and is never a candidate. Each chosen
+candidate earns one probe stare - a longer, deeper capture billed
+into the watch bill as a class P item, the probe's own bill class,
+granted at muster like every other reception and drawing its
+evidence under the retention tiers (the stare's channel excerpt
+rides tier 2). A stated per-watch budget bounds the stares - at
+most a configured count and a configured number of tuner seconds,
+both set in the profile's probe section - so the standing rotation
+is never starved by probing, and unspent budget is simply not
+used. The desk is receive-only, like every desk, and it files no
+bearing claims: direction finding is a hardware build, separately
+queued, and is not part of this one.
+
+Classification runs through an in-house feature-tree classifier:
+a deterministic extractor computing about twenty features from a
+capture excerpt - occupied and interquartile bandwidth, spectral
+flatness and peak concentration, carrier fraction, envelope
+statistics and keying duty, instantaneous-frequency spread and
+discrete tone structure, a symbol-rate estimate from
+autocorrelation, centroid drift, sideband asymmetry, tone
+persistence, and the census voice grader's score on each voice
+demodulation - feeding a decision tree whose splits are readable
+constants in the code. The tree classifies into the families the
+system already decodes (AM voice, FM voice, SSB voice, FSK data,
+CW) plus two honest non-family outcomes, a tone and noise.
+Anything else is UNKNOWN, and an unknown result is a first-class
+answer, never a forced label. The classification hierarchy the
+program follows is a deterministic feature tree first and
+dossier-cluster voting decisive above it; a tiny convolutional
+second opinion is the stated later addition and is not in this
+build.
+
+The vote is per dossier, not per burst: every observation of an
+emitter contributes its per-burst classification weighted by its
+signal strength in power terms, and the dossier carries the voted
+family only when a real family holds at least 60 percent of the
+weight on at least two observations. A vote that does not clear
+the margin leaves the dossier UNRESOLVED with the split shown -
+the split is the finding - and the voted result is filed as the
+desk's assessment event and stated in the Watch Report's anomaly
+account. Per-burst labels stay in the record as observations
+either way.
+
+The voice path carries a calibration correction from a real
+catch: a steady pure tone was once graded as possible voice by
+the audio census. The census grader now tests for a tone ahead
+of the voice score - where one narrow spectral peak and its
+harmonics hold at least 85 percent of the demodulated audio
+power, with no syllabic modulation and no spectral movement, the
+capture is a tone - and tones are filed as tones, with their
+frequency and stability stated, never as possible voice.
+
+A probe capture preserves context around its target - as much
+pre- and post-event material as the source architecture honestly
+holds, with the held amount stated in the stare event rather
+than implied. The simulated source models the whole dwell and
+places its rendered capture window on the burst; the real source
+holds one contiguous capture at the dwell's start and states
+that no context outside that block exists. The probe routes its
+captures to the desks whose families the vote leaves open, and
+every desk that attempts a decode of the stare and fails files
+that failure as a negative-result event linked to the stare:
+silence from a desk is not a negative result, only a filed
+attempt is. Desks no in-process attempt exists for are named in
+the vote assessment with the reason, never silently skipped.
+
+For each target the desk also files the first working piece of
+discrimination, computed from Index queries over the cluster's
+full history: cross-band coincidence (whether anything else in
+the station's record fired within two minutes of a hearing, on
+another band) and recurrence against both clocks - the
+observation times folded by the solar day and by the sidereal
+day, with the fold that clusters stated plainly. These are
+computations over the existing record, cheap and exact, and
+they are shared groundwork for the anomaly register that follows
+this build.
+
 ## Desk roster
 
 Tier 1 desks are functional against both sources, decoding genuine
@@ -360,14 +444,19 @@ Tier 3 desks are metadata-only by design: cellular and trunking
 censuses count systems, bands, and activity and never attempt content.
 The sweep desk is the anomaly sensor: every dwell files spectrum
 observations with shape classification, and unknown shapes are graded
-UNRESOLVED.
+UNRESOLVED. The probe desk stands in this tier as a window desk: it
+runs wherever the station has heard something unexplained more than
+once, and where the record holds no such candidate it bills nothing
+and the watch proceeds without it.
 
 ## Configuration
 
 One profile file carries every knob: source kind and seed, home
 position and antenna description, watch length, SITREP period, the
 deep-sweep window, the disk ceiling, rotation weights and dwells, the
-desk roster, the applicability range and overrides, FLASH triggers,
+desk roster, the probe budget (stares per watch, tuner seconds per
+watch, stare length, and the minimum hearings a candidate needs),
+the applicability range and overrides, FLASH triggers,
 the FLASH chime switch, snippet caps,
 transcription bounds, radiosonde sites, and an advanced section
 (gain policy, ephemeris file, interrupt cap, rehearsal outages, and

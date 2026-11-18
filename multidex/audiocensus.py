@@ -13,7 +13,10 @@ Honesty contract: an emission no desk can decode is reported as
 unknown audio with its estimated modulation and grade. Nothing
 here invents speech; a grade is a machine estimate, labelled as
 such in every product. DATA-class emissions are filed as data,
-never graded as voice.
+never graded as voice. Since 0.11.0 a steady tone is filed as
+a tone, never as possible voice: the voice grader's tone gate
+sits ahead of its rubric, because the rubric's band
+concentration and harmonicity terms both pay a pure tone.
 
 numpy does the DSP. It is present on the watch host; where it is
 absent the census benches with that reason rather than degrading
@@ -307,7 +310,9 @@ def _frame_psd(audio, rate):
 
 def grade_audio(audio, rate, snr_db, klass, duty):
     """Voice-likelihood grade. Returns (letter, score, parts).
-    DATA is a class, not a grade: returns ('DATA', 0, {})."""
+    DATA is a class, not a grade: returns ('DATA', 0, {}).
+    A steady tone is a class too: returns ('TONE', 0, parts)
+    from the tone gate ahead of the rubric."""
     if klass == "DATA":
         return "DATA", 0, {}
     parts = {}
@@ -367,6 +372,38 @@ def grade_audio(audio, rate, snr_db, klass, duty):
     elif 0.1 <= duty <= 0.95:
         score += 7.0
     score_i = int(round(score))
+    # The tone gate (0.11.0), ahead of every letter the rubric
+    # can award: a capture dominated by one persistent narrow
+    # spectral peak and its harmonics, with no syllabic
+    # modulation and no spectral movement, is a tone, and a
+    # tone is filed as a tone, never as possible voice. The
+    # rubric alone pays a pure tone twice - band concentration
+    # (a tone sits inside the voice band) and harmonicity (a
+    # tone's autocorrelation is a perfect pitch peak) - which
+    # is how a steady 1010 Hz test tone with one harmonic,
+    # flat level and no syllables graded voice C in the field
+    # on 2026-11-18. The gate's test is exact: the peak bin
+    # and its first three harmonics hold at least 85 percent
+    # of the audio power, the syllabic window count is zero,
+    # and the frame centroid spread is at most 0.05.
+    in_band = (freqs >= 80) & (freqs <= 4000)
+    if in_band.any():
+        peak_i = int(np.argmax(np.where(in_band, spec, 0.0)))
+        f0 = float(freqs[peak_i])
+        bin_hz = float(freqs[1] - freqs[0]) if len(freqs) > 1 \
+            else 1.0
+        tone_power = 0.0
+        for k in (1, 2, 3, 4):
+            tone_power += float(spec[
+                np.abs(freqs - k * f0) <= 1.5 * bin_hz].sum())
+        tone_conc = tone_power / total
+    else:
+        f0, tone_conc = 0.0, 0.0
+    parts["tone_concentration"] = round(float(tone_conc), 2)
+    if f0:
+        parts["tone_freq_hz"] = int(round(f0))
+    if tone_conc >= 0.85 and hits == 0 and dyn <= 0.05:
+        return "TONE", 0, parts
     # Hard gates before any letter above C.
     if snr_db < 12.0 or duty < 0.15:
         letter = "C" if score_i >= 35 else "D"

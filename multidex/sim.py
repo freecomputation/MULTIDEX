@@ -138,6 +138,16 @@ class SimWorld:
                 # than sounding once. Each repeats on its own period.
                 "period": 9000 + rng.randrange(3600),
             })
+        # The probe desk's planted quarry (0.11.0): one fast,
+        # regular unknown on a short period, so a probe stare
+        # billed anywhere in a watch overlaps a burst - its
+        # off-time (540 s) is shorter than the standard probe
+        # dwell (600 s). Fixed values, drawn from no RNG
+        # stream, so the rest of the world is unchanged.
+        self.unknowns.append({
+            "t": start_epoch + 300, "dur": 360,
+            "freq_hz": 461.0e6, "bw_hz": 25e3, "peak_dbm": -66,
+            "shape": "unknown-pulsed", "period": 900})
         self.sonde_sites = profile["sondes"]["sites"]
         self.synoptic_hours = profile["sondes"]["synoptic_hours"]
         tle_path = None
@@ -394,7 +404,8 @@ class SimSource:
         return {"adsb", "airband", "milair", "acars", "ais", "wxradio",
                 "ism", "aprs", "pager", "sweep", "satellite", "sonde",
                 "cellular", "trunking", "broadcast", "audiocensus",
-                "amateur", "iss", "vdl2", "digitalvoice", "hfdl"}
+                "amateur", "iss", "vdl2", "digitalvoice", "hfdl",
+                "probe"}
 
     # -------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -527,6 +538,134 @@ class SimSource:
                 "rate": rate, "peak": peak, "samples": n,
                 "freq_hz": em["freq_hz"], "bw_hz": em["bw_hz"]}
 
+    def _probe_feed(self, center_hz, bw_hz, t0, t1):
+        """The probe stare on the simulated source (0.11.0):
+        the world model is exact about its unknowns, so the
+        feed states plainly whether a burst of the target
+        overlapped the stare, and renders the stare's most
+        active span - a 2.5 s window placed on the burst - as
+        IQ through the real census engine, with a channel
+        excerpt of the target. The context states where the
+        burst sat inside the dwell: the stare held the
+        frequency for the whole dwell in the model, and the
+        rendered window is the burst's span of it."""
+        import numpy as np
+        from . import audiocensus
+        w = self.world
+        fs = 240000.0
+        seconds = 2.5
+        n = int(fs * seconds)
+        rng = _rng(w.seed, int(center_hz), int(t0), "probe")
+        gen = np.random.default_rng(int(rng.random() * 1e9))
+        t = np.arange(n) / fs
+        iq = (gen.normal(0, 0.02, n)
+              + 1j * gen.normal(0, 0.02, n)).astype(np.complex128)
+        # The target: the world unknown nearest the stare's
+        # centre. A stare is at one emitter; another unknown
+        # bursting in the window does not make this one heard.
+        target = None
+        for unk in w.unknowns:
+            if abs(unk["freq_hz"] - center_hz) <= bw_hz / 2:
+                if target is None or abs(unk["freq_hz"] - center_hz) \
+                        < abs(target["freq_hz"] - center_hz):
+                    target = unk
+        burst = None
+        if target is not None:
+            first = target["t"]
+            if t1 >= first:
+                k0 = max(0, int((t0 - first) // target["period"]) - 1)
+                k1 = int((t1 - first) // target["period"]) + 1
+                for k in range(k0, k1 + 1):
+                    bs = first + k * target["period"]
+                    be = bs + target["dur"]
+                    if bs <= t1 and t0 <= be:
+                        burst = (bs, be)
+                        break
+        silent = burst is None
+        if not silent:
+            bs, be = burst
+            off = target["freq_hz"] - center_hz
+            # The burst's span inside the rendered window: the
+            # window sits on the burst (it starts at the later
+            # of the dwell's start and the burst's start), so
+            # the burst is on from the window's first sample.
+            on_at = 0.0
+            on_for = min(seconds, be - max(t0, bs))
+            gate = ((t >= on_at) & (t < on_at + on_for)).astype(
+                np.float64)
+            shape = target["shape"]
+            bw = target["bw_hz"]
+            if "chirp" in shape:
+                sweep = bw / 4.0
+                phase = 2 * np.pi * (
+                    (off - sweep) * t
+                    + (2 * sweep / max(on_for, 0.1)) * t * t)
+                sig = gate * np.exp(1j * phase)
+            elif "pulsed" in shape:
+                pulse = ((t % 0.1) < 0.03).astype(np.float64)
+                sig = gate * pulse * np.exp(
+                    2j * np.pi * (off + 1000.0) * t)
+            elif "wideband" in shape:
+                raw = (gen.normal(0, 1, n)
+                       + 1j * gen.normal(0, 1, n))
+                spec = np.fft.fft(raw)
+                fr = np.fft.fftfreq(n, 1.0 / fs)
+                keep = np.abs(fr - off) <= bw / 2
+                sig = gate * np.fft.ifft(np.where(keep, spec, 0.0))
+                sig = sig / (np.max(np.abs(sig)) + 1e-9)
+            elif "multicarrier" in shape:
+                sig = np.zeros(n, dtype=np.complex128)
+                for j, frac in enumerate((-0.3, -0.1, 0.1, 0.3)):
+                    sig = sig + gate * np.exp(
+                        2j * np.pi * (off + frac * bw) * t
+                        + 1j * j)
+                sig = sig / 4.0
+            else:
+                sig = gate * np.exp(2j * np.pi * off * t)
+            iq = iq + 0.5 * sig
+        census = audiocensus.analyze(iq, fs, center_hz,
+                                     extract_cap=6)
+        excerpt = None
+        snr = None
+        cand = None
+        for c in census.get("candidates") or []:
+            if abs(c["freq_hz"] - center_hz) <= bw_hz / 2:
+                if cand is None or c["snr_db"] > cand["snr_db"]:
+                    cand = c
+        if cand is not None:
+            snr = cand["snr_db"]
+        if target is not None and not silent:
+            chan, rate = audiocensus._extract(
+                iq, fs, target["freq_hz"] - center_hz,
+                max(25e3, target["bw_hz"]))
+            exc = audiocensus._excerpt(chan, rate)
+            if exc is not None:
+                exc["freq_hz"] = target["freq_hz"]
+                exc["bw_hz"] = target["bw_hz"]
+                excerpt = exc
+        if silent:
+            context = {
+                "capture_s": seconds, "pre_s": None, "post_s": None,
+                "note": "no burst of the target overlapped the "
+                        "stare: the simulated source models the "
+                        "stare for the whole dwell, and the "
+                        "target's bursts are stated exactly by "
+                        "its period"}
+        else:
+            bs, be = burst
+            context = {
+                "capture_s": seconds,
+                "pre_s": round(max(0.0, bs - t0), 1),
+                "post_s": round(max(0.0, t1 - be), 1),
+                "note": "the simulated source models the stare "
+                        "for the whole dwell; the rendered "
+                        "capture window is placed on the burst, "
+                        "the stare's most active span"}
+        return {"target_freq_hz": float(center_hz),
+                "census": census, "excerpt": excerpt,
+                "silent": silent, "snr_db": snr,
+                "context": context}
+
     def _airband_active(self, freq_hz, t):
         w = self.world
         if freq_hz == 121.5e6:
@@ -543,6 +682,9 @@ class SimSource:
                 feeds["sweep"] = self.scan(center_hz, bw_hz, t0, t1)
             elif desk == "audiocensus":
                 feeds["audiocensus"] = self._audiocensus_feed(
+                    center_hz, bw_hz, t0, t1)
+            elif desk == "probe":
+                feeds["probe"] = self._probe_feed(
                     center_hz, bw_hz, t0, t1)
             elif desk == "adsb":
                 feeds["adsb"] = {"frames": self._adsb_frames(t0, t1)}

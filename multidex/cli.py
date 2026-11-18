@@ -148,6 +148,18 @@ def cmd_plan(args):
     sats, _path = gates.load_sats(profile)
     start = time.time()
     bill = build_bill(profile, start, sats)
+    # The probe plan rides the preview as it rides the muster:
+    # candidates from the home's Index, billed as class P
+    # inside the probe budget (0.11.0).
+    from . import probe as _probe
+    from .index import Index as _Index
+    probe_chosen = []
+    index = _Index(home)
+    try:
+        bill, probe_chosen = _probe.plan_items(
+            bill, profile, _probe.candidates(index, profile), start)
+    finally:
+        index.close()
     counts = {}
     for item in bill:
         counts[item["cls"]] = counts.get(item["cls"], 0) + 1
@@ -155,6 +167,9 @@ def cmd_plan(args):
           "C %d)" % (profile["name"], util.fmt_stamp(start), len(bill),
                      counts.get("A", 0), counts.get("B", 0),
                      counts.get("C", 0)))
+    if probe_chosen:
+        print("Probe stares planned from the Index: %d (class P, "
+              "inside the probe budget)" % len(probe_chosen))
     for item in bill:
         print("- %s [%s/%s] %s - %s (%s)"
               % (util.fmt_time(item["start"]), item["cls"], item["kind"],

@@ -73,9 +73,28 @@ hf_night = { weight = 4,  dwell_s = 300 }
 stand = ["adsb", "airband", "milair", "acars", "ais", "wxradio", "ism",
          "aprs", "pager", "sweep", "satellite", "sonde", "cellular",
          "trunking", "broadcast", "audiocensus", "amateur", "iss",
-         "vdl2", "digitalvoice", "hfdl"]
+         "vdl2", "digitalvoice", "hfdl", "probe"]
 # Desks to bench even though they could stand.
 bench = []
+
+[probe]
+# The probe desk (0.11.0): stares at the unexplained. At muster it
+# computes its candidate list from the Index - emitters heard at
+# least min_observations times, graded UNRESOLVED, never decoded -
+# ranks them by recurrence, classifier uncertainty and SNR, and
+# bills one stare per candidate as a class P bill item inside this
+# budget. The budget bounds the watch's probe work in count and in
+# tuner seconds; unspent budget is simply not used, and a watch
+# with no candidates bills no stares.
+max_per_watch = 4
+max_seconds_per_watch = 2400
+# One stare's length: long enough for a recurring emitter to show
+# its habit inside the capture, short enough that the rotation is
+# not starved.
+dwell_s = 600
+# A candidate is by definition heard more than once: a single
+# hearing is a census row, not a target.
+min_observations = 2
 
 [applicability]
 # Applicability (0.9.0): at muster the officer judges every desk
