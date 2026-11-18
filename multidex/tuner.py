@@ -112,6 +112,150 @@ def _run_tool(cmd, timeout=60):
         return (exc.output or b"").decode("utf-8", "replace")
 
 
+_JT8_LINE = re.compile(
+    r"^\d{6}\s+(-?\d+)\s+(-?\d+\.\d+)\s+(\d+)\s+~\s+(.*)$")
+_DSD_PATTERNS = [
+    ("DMR", re.compile(r"DMR.*?(?:TG|Talkgroup)[:\s]*(\d+)", re.I)),
+    ("P25", re.compile(r"P25.*?(?:TG|Talkgroup)[:\s]*(\d+)", re.I)),
+    ("NXDN", re.compile(r"NXDN.*?(?:TG|Talkgroup)[:\s]*(\d+)", re.I)),
+]
+
+
+def _run_jt8(audio12, ft8_hz):
+    """Write 12 kHz audio to a temp WAV and run the host's jt9
+    in FT8 mode; parse its decode lines."""
+    out = []
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav",
+                                         delete=False) as fh:
+            path = fh.name
+        import numpy as np
+        pcm = (np.clip(audio12, -1, 1) * 32767).astype("<i2")
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(12000)
+            w.writeframes(pcm.tobytes())
+        text = _run_tool(["jt9", "-8", "-f", "1500", path],
+                         timeout=90)
+        for line in text.splitlines():
+            m = _JT8_LINE.match(line.strip())
+            if m:
+                snr, dt, off, msg = m.groups()
+                out.append({"freq_hz": ft8_hz + int(off),
+                            "snr_db": int(snr), "dt_s": float(dt),
+                            "text": msg.strip()})
+    except Exception:
+        return out
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return out
+
+
+def _run_dumpvdl2(source, t0, t1):
+    """IQ capture into dumpvdl2 with JSON output; messages are
+    the frames libacars structured (ACARS over VDL2 where the
+    payload is ACARS). Any tool failure yields an empty list -
+    the dwell's gap machinery reports capture health separately,
+    and the burst census is the no-tool path, not a fallback for
+    a broken tool."""
+    msgs = []
+    iq_path = out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".iq",
+                                         delete=False) as fh:
+            iq_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix=".json",
+                                         delete=False) as fh:
+            out_path = fh.name
+        rate = 1050000
+        size = _stream_to_file(
+            ["rtl_sdr", "-f", "136975000", "-s", str(rate),
+             "-n", str(rate * 45), "-g", "23", iq_path],
+            iq_path, 90)
+        if size == 0:
+            return msgs
+        _run_tool(["dumpvdl2", "--iq", iq_path,
+                   "--sample-rate", str(rate),
+                   "--output", "json:file:%s" % out_path],
+                  timeout=180)
+        with open(out_path) as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                v = obj.get("vdl2", {})
+                app = v.get("app", {})
+                acars = app.get("acars", {}) if isinstance(
+                    app, dict) else {}
+                if acars:
+                    msgs.append({
+                        "tail": acars.get("reg") or v.get("dst"),
+                        "text": "ACARS over VDL2 label %s: %s"
+                                % (acars.get("label"),
+                                   (acars.get("msg_text") or "")
+                                   .strip()),
+                        "raw": line.strip()[:400]})
+    except Exception:
+        return msgs
+    finally:
+        for p in (iq_path, out_path):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    return msgs
+
+
+def _run_dsd_fme(center_hz, seconds):
+    """Run DSD-FME against the RTL-SDR for a bounded slice and
+    parse its log for call metadata. The program's own output
+    vocabulary varies by build; the parser is deliberately
+    narrow (protocol + talkgroup lines) and anything it cannot
+    read is not reported."""
+    calls = []
+    try:
+        proc = subprocess.Popen(
+            ["dsd-fme", "-i", "rtl:0:%d:23" % int(center_hz),
+             "-o", "null"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            raw, _ = proc.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raw, _ = proc.communicate()
+        text = raw.decode("utf-8", "replace")
+    except Exception:
+        return calls
+    seen = set()
+    for line in text.splitlines():
+        for proto, pat in _DSD_PATTERNS:
+            m = pat.search(line)
+            if not m:
+                continue
+            src = re.search(r"(?:SRC|Source)[:\s]*(\d+)", line, re.I)
+            slot = re.search(r"(?:SLOT|TS)[:\s]*([12])", line, re.I)
+            key = (proto, m.group(1),
+                   src.group(1) if src else None)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append({
+                "protocol": proto, "talkgroup": m.group(1),
+                "source": src.group(1) if src else None,
+                "slot": int(slot.group(1)) if slot else None,
+                "encrypted": "encrypt" in line.lower(),
+                "freq_hz": center_hz})
+    return calls
+
+
 # ----------------------------------------------------------- Mode S demod
 
 def demod_modes(raw, rate=2000000):
@@ -335,9 +479,19 @@ class RealSource:
         return True, detail
 
     def capabilities(self):
-        return {"sweep", "adsb", "airband", "ais", "wxradio", "ism",
-                "aprs", "pager", "satellite", "sonde", "broadcast",
-                "cellular", "trunking"}
+        caps = {"sweep", "adsb", "airband", "milair", "ais", "wxradio",
+                "ism", "aprs", "pager", "satellite", "sonde", "broadcast",
+                "cellular", "trunking", "acars", "audiocensus",
+                "amateur", "iss"}
+        # Tool-bound desks stand on the real source only when their
+        # decoder program is present on the host; desk_state states
+        # the staging reason when they are not.
+        from .toolbind import tool_available
+        if tool_available("dumpvdl2"):
+            caps.add("vdl2")
+        if tool_available("dsd-fme"):
+            caps.add("digitalvoice")
+        return caps
 
     # -------------------------------------------------------- raw capture
     def _rtl_fm(self, freq_hz, mode, rate, seconds, squelch=0):
@@ -550,6 +704,182 @@ class RealSource:
             hi = min(len(samples), int((close_idx * 0.1 + 0.2) * rate))
             seg["audio_b64"] = _wav_b64(samples[lo:hi], rate)
         return seg
+
+    def _feed_acars(self, vfos, center_hz, bw_hz, t0, t1):
+        """ACARS on the real source: AM audio at 131.55 MHz, burst
+        segmentation on the envelope, and the pure-Python ARINC
+        618 decoder (multidex.acars). The capture is bounded at
+        90 s of the datalink dwell; only CRC-verified frames are
+        reported, as normalised ACARS text."""
+        import numpy as np
+        from . import acars as acars_mod
+        freq = vfos[0]["freq_hz"] if vfos else 131.55e6
+        seconds = min(90.0, max(10.0, t1 - t0))
+        samples = np.asarray(
+            self._audio(freq, "am", 12000, seconds), dtype=float)
+        if len(samples) < 12000:
+            return {"messages": []}
+        env = np.abs(samples)
+        k = 60  # 5 ms smoothing at 12 ksps
+        env = np.convolve(env, np.ones(k) / k, mode="same")
+        floor = np.median(env) + 1e-9
+        active = env > floor * 4.0
+        messages = []
+        i = 0
+        n = len(samples)
+        while i < n:
+            if active[i]:
+                j = i
+                while j < n and (active[j] or
+                                 (j + 1200 < n and active[j + 1200])):
+                    j += 1
+                burst = samples[max(0, i - 600):min(n, j + 600)]
+                if len(burst) > 2400:
+                    messages.extend(
+                        acars_mod.decode_audio(burst, 12000))
+                i = j
+            else:
+                i += 1
+        return {"messages": messages}
+
+    def _feed_milair(self, vfos, center_hz, bw_hz, t0, t1):
+        # UHF military airband is AM voice on the same terms as the
+        # VHF airband desk: per-channel rtl_fm AM captures, envelope
+        # segmentation, audio carried for the strong segments.
+        return self._feed_airband(vfos, center_hz, bw_hz, t0, t1)
+
+    def _feed_audiocensus(self, vfos, center_hz, bw_hz, t0, t1):
+        """One bounded IQ slice of the window through the census
+        engine: 5 s at the window rate, at most 6 extractions.
+        The slice is a sample of the dwell and the desk says so;
+        the census never claims the whole dwell was demodulated."""
+        import numpy as np
+        from . import audiocensus
+        rate = 2400000
+        seconds = 5.0
+        raw = self._iq(center_hz, rate, int(rate * seconds),
+                       seconds=int(seconds) + 30)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        return audiocensus.analyze(iq, float(rate), center_hz,
+                                   extract_cap=6)
+
+    def _feed_amateur(self, vfos, center_hz, bw_hz, t0, t1):
+        """Amateur desk: CW decoded in pure Python from an IQ
+        slice of the band's CW segment; FT8 bound to the host's
+        jt9 program when present (its absence benches FT8 only,
+        stated in the feed, never the whole desk). SSB voice on
+        these windows is the audio census desk's catch."""
+        import numpy as np
+        from . import cw as cw_mod
+        from .audiocensus import _extract
+        from .toolbind import tool_available
+        feed = {"cw": [], "ft8": [], "ft8_note": None}
+        if center_hz < 10e6:
+            cw_center, ft8_hz = 7030000.0, 7074000.0
+        else:
+            cw_center, ft8_hz = 14030000.0, 14074000.0
+        rate = 240000
+        raw = self._iq(cw_center, rate, rate * 6, seconds=40)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        chan, crate = _extract(iq, float(rate), 0.0, 40000.0)
+        for sig in cw_mod.detect(chan, crate):
+            sig = dict(sig)
+            sig["freq_hz"] = cw_center + sig.pop("freq_offset_hz")
+            feed["cw"].append(sig)
+        if not tool_available("jt9"):
+            feed["ft8_note"] = ("FT8 not bound: jt9 (WSJT-X) is "
+                                "not on this host")
+            return feed
+        # FT8: 16 s of IQ over the watering hole, product-demod
+        # to 12 kHz USB audio, jt9 does the LDPC decode.
+        raw = self._iq(ft8_hz + 1500, rate, rate * 16, seconds=60)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        chan, crate = _extract(iq, float(rate), -1500.0, 4000.0)
+        from .audiocensus import _demod
+        audio = _demod(chan, crate, "USB")
+        audio12 = np.interp(
+            np.arange(int(len(audio) * 12000 / 16000)),
+            np.arange(len(audio)) * (12000 / 16000), audio)
+        feed["ft8"] = _run_jt8(audio12, ft8_hz)
+        return feed
+
+    def _feed_iss(self, vfos, center_hz, bw_hz, t0, t1):
+        """ISS pass: FM audio on the downlink for the pass window
+        (bounded), an SSTV decode attempt on the whole capture,
+        and envelope voice segmentation. Most passes are silent;
+        the feed says attempted either way."""
+        import numpy as np
+        from . import sstv as sstv_mod
+        seconds = min(600.0, max(30.0, t1 - t0))
+        samples = self._audio(145.8e6, "fm", 22050, seconds)
+        feed = {"attempted": True, "segments": [], "sstv": None}
+        if not samples:
+            return feed
+        dec = None
+        try:
+            dec = sstv_mod.decode_audio(
+                np.asarray(samples, dtype=float) / 32768.0, 22050)
+        except Exception:
+            dec = None
+        if dec:
+            import base64 as _b64
+            feed["sstv"] = {"mode": dec["mode"],
+                            "lines": dec["lines"],
+                            "height": dec["height"],
+                            "png_b64": _b64.b64encode(
+                                dec["png"]).decode("ascii")}
+            return feed
+        feed["segments"] = self._airband_segments(
+            samples, 22050, 145.8e6, 0.0)
+        return feed
+
+    def _feed_vdl2(self, vfos, center_hz, bw_hz, t0, t1):
+        """VDL2: bound to dumpvdl2 when the host carries it (IQ in,
+        JSON out); otherwise a burst census on 136.975 MHz -
+        burst counts only, no frame claims."""
+        from .toolbind import tool_available
+        import numpy as np
+        if tool_available("dumpvdl2"):
+            return {"messages": _run_dumpvdl2(self, t0, t1),
+                    "bursts": []}
+        rate = 2400000
+        raw = self._iq(136.975e6, rate, rate * 3, seconds=30)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = (u[0::2] - 127.5) / 127.5 \
+            + 1j * ((u[1::2] - 127.5) / 127.5)
+        power = np.abs(iq) ** 2
+        block = rate // 10
+        blocks = [float(power[i:i + block].mean())
+                  for i in range(0, len(power) - block, block)]
+        if not blocks:
+            return {"messages": [], "bursts": []}
+        floor = float(np.median(blocks))
+        bursts = sum(1 for b in blocks if b > floor * 6)
+        return {"messages": [],
+                "bursts": [{"count": bursts}] if bursts else []}
+
+    def _feed_digitalvoice(self, vfos, center_hz, bw_hz, t0, t1):
+        """Digital voice metadata via the bound DSD-FME program's
+        own log. Voice is never decoded (see the desk)."""
+        from .toolbind import tool_available
+        if not tool_available("dsd-fme"):
+            return {"calls": []}
+        return {"calls": _run_dsd_fme(center_hz,
+                                      min(60.0, max(10.0, t1 - t0)))}
 
     def _feed_ais(self, vfos, center_hz, bw_hz, t0, t1):
         sentences = []

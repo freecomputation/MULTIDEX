@@ -16,6 +16,7 @@ KINDS = (
     "decode",       # a decoder produced content or a structured record
     "observation",  # an emission seen, not decoded (sweep)
     "voice",        # a voice transmission heard on a voice desk
+    "audio",        # an audio emission found by the census, not decoded
     "alert",        # a broadcast alert (SAME header, guard activity)
     "pass",         # a satellite pass or sonde flight milestone
     "telemetry",    # a tracked object's telemetry (sonde, vessel, aircraft)

@@ -11,7 +11,8 @@ import subprocess
 import time
 
 from . import orbit, profile as profilemod
-from .desks import ALWAYS_BENCHED, SPECS, TRANSCRIPTION_REASON, desk_state
+from .desks import (ALWAYS_BENCHED, SPECS, TRANSCRIPTION_REASON,
+                    desk_state, transcription_state)
 from .tuner import RealSource
 
 
@@ -164,7 +165,22 @@ def doctor_text(profile, home):
         if reason:
             line += " - %s" % reason
         lines.append(line)
-    lines.append("- transcription: benched - %s" % TRANSCRIPTION_REASON)
+    _tstate, _treason = transcription_state()
+    if _tstate == "bound":
+        lines.append("- transcription: bound - the host faster-whisper "
+                     "stack is importable; the bounded triage queue "
+                     "governs what reaches it")
+    else:
+        lines.append("- transcription: benched - %s" % _treason)
+    from .toolbind import tool_available as _ta
+    if _ta("jt9"):
+        lines.append("- amateur FT8: bound - the host jt9 program "
+                     "decodes; the amateur desk files its lines")
+    else:
+        lines.append("- amateur FT8: benched - jt9 (WSJT-X) is not "
+                     "on this host; the amateur desk still stands "
+                     "for CW, and SSB voice on its windows is the "
+                     "audio census desk's catch")
     lines.append("Source capabilities: %s"
                  % (", ".join(sorted(capabilities)) if capabilities
                     else "all desks (simulated source)"))

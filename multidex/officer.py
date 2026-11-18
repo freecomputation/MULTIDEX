@@ -13,6 +13,7 @@ import fcntl
 import glob
 import math
 import os
+import threading
 import time
 
 from . import gates, orbit, products, util
@@ -26,10 +27,20 @@ from .profile import time_scale
 from .supervisor import Supervisor
 from .tuner import RealSource, TunerLost, TunerServer
 
-# Rotation entry -> (center Hz, bandwidth Hz, desks, hours rule)
+# Rotation entry -> (centers, bandwidth Hz, desks, hours rule).
+# Centers is one frequency or a tuple of window centres: successive
+# dwells of the slot cycle through its windows in order, so every
+# channel a desk serves falls inside a captured window on a known
+# cadence instead of depending on one wide window containing them
+# all (the 0.1.x airband slot centred 125.0 MHz and dropped four of
+# its six channels on every dwell).
 ROTATION = {
     "adsb":     (1090e6, 2.4e6, ["adsb"], "all"),
-    "airband":  (125.0e6, 2.4e6, ["airband"], "all"),
+    "airband":  ((121.3e6, 118.6e6, 125.8e6, 134.3e6), 2.4e6,
+                 ["airband"], "all"),
+    "milair":   ((239.275e6, 243.0e6, 248.55e6, 270.35e6, 319.25e6,
+                  327.125e6, 336.3e6, 371.35e6), 2.4e6,
+                 ["milair"], "all"),
     "datalink": (131.55e6, 2.4e6, ["acars"], "all"),
     "marine":   (162.3e6, 2.4e6, ["ais", "wxradio"], "all"),
     "aprs":     (144.39e6, 2.4e6, ["aprs"], "all"),
@@ -39,8 +50,8 @@ ROTATION = {
     "cellular": (752.5e6, 2.4e6, ["cellular"], "all"),
     "trunking": (851.75e6, 2.4e6, ["trunking"], "all"),
     "fmband":   (98e6, 2.4e6, ["broadcast", "sweep"], "all"),
-    "hf_day":   (14.15e6, 2.4e6, ["sweep"], "day"),
-    "hf_night": (7.1e6, 2.4e6, ["sweep"], "night"),
+    "hf_day":   (14.15e6, 2.4e6, ["sweep", "amateur"], "day"),
+    "hf_night": (7.1e6, 2.4e6, ["sweep", "amateur"], "night"),
 }
 
 SWEEP_WINDOWS = [7.05e6, 14.2e6, 28.4e6, 50.5e6, 121.5e6, 146.5e6,
@@ -105,7 +116,7 @@ def satellite_items(profile, start, end, sats):
             "start": p["aos"] - 120,
             "dur": (p["los"] - p["aos"]) + 240,
             "center_hz": freq, "bw_hz": 2.4e6,
-            "desks": ["sweep"] if is_iss else ["satellite"],
+            "desks": ["iss"] if is_iss else ["satellite"],
             "pass": p})
     return items
 
@@ -130,7 +141,12 @@ def build_bill(profile, start, sats):
     excluded = profile["excluded"]["bands"]
     credits = {name: 0.0 for name in ROTATION}
     sweep_cycle = [0]
+    window_cycle = {name: 0 for name in ROTATION}
     last_sweep = [start - 2700]
+
+    def centers_of(name):
+        centers = ROTATION[name][0]
+        return centers if isinstance(centers, tuple) else (centers,)
 
     def excluded_window(center, bw):
         lo, hi = center - bw / 2, center + bw / 2
@@ -139,14 +155,14 @@ def build_bill(profile, start, sats):
     def pick_entry(t):
         hour = _local_hour(t)
         allowed = []
-        for name, (center, bw, _d, rule) in ROTATION.items():
+        for name, (_centers, bw, _d, rule) in ROTATION.items():
             if name not in rotation:
                 continue
             if rule == "day" and not 8 <= hour < 20:
                 continue
             if rule == "night" and not (hour >= 20 or hour < 8):
                 continue
-            if excluded_window(center, bw):
+            if all(excluded_window(c, bw) for c in centers_of(name)):
                 continue
             allowed.append(name)
         if not allowed:
@@ -183,7 +199,11 @@ def build_bill(profile, start, sats):
                 if name is None:
                     out.append(sweep_item(t, min(300, remaining)))
                 else:
-                    center, bw, desks, _rule = ROTATION[name]
+                    _c, bw, desks, _rule = ROTATION[name]
+                    windows = [c for c in centers_of(name)
+                               if not excluded_window(c, bw)]
+                    center = windows[window_cycle[name] % len(windows)]
+                    window_cycle[name] += 1
                     dur = min(rotation[name]["dwell_s"], remaining)
                     out.append({"cls": "B", "kind": "dwell",
                                 "label": "Rotation %s" % name,
@@ -223,6 +243,11 @@ class WatchRunner:
         self._lock_fh = None
         self._stood_down = False
         self._scale = None
+        self._tx_queue = None
+        self._tx_worker = None
+        self._tx_results = []
+        self._tx_lock = threading.Lock()
+        self._tx_errors = 0
 
     # ------------------------------------------------------------ helpers
     def _resolve_source(self, watch_start):
@@ -407,6 +432,7 @@ class WatchRunner:
         self.watch_dir = self.index.watch_dir(watch_id)
         self.supervisor.set_watch_dir(self.watch_dir)
         self.exploit = Exploit(self.index, profile)
+        self._start_transcription()
         bill = build_bill(profile, start, sats)
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
         meta = {
@@ -707,6 +733,7 @@ class WatchRunner:
         util.write_json(os.path.join(self.watch_dir, "state.json"), state)
 
     def _execute(self, item, watch_start, actual_start=None):
+        self._drain_transcripts()
         planned_start = item["start"]
         t0 = actual_start if actual_start is not None else planned_start
         t1 = t0 + item["dur"]
@@ -715,12 +742,20 @@ class WatchRunner:
         for name in item["desks"]:
             if self._desk_benched_reason(name, source) is None:
                 standing.append(name)
+        # The audio census rides every captured window (rotation,
+        # sweep and pass items alike): it is a window desk with no
+        # channels of its own, fed from the window's IQ.
+        if "audiocensus" not in standing and \
+                self._desk_benched_reason("audiocensus", source) is None:
+            standing.append("audiocensus")
         desk_channels = {name: channels_for(name) for name in standing}
         heavy = {n for n in standing if SPECS[n][2] == "heavy"}
         vfos, dropped = channel_plan(item["center_hz"], item["bw_hz"],
                                      desk_channels, heavy)
-        if item["kind"] == "pass" and "satellite" in standing:
-            vfos = [{"desk": "satellite", "freq_hz": item["center_hz"],
+        if item["kind"] == "pass" and ("satellite" in standing
+                                       or "iss" in standing):
+            pdesk = "iss" if "iss" in item["desks"] else "satellite"
+            vfos = [{"desk": pdesk, "freq_hz": item["center_hz"],
                      "bw_hz": 150e3, "pass": item.get("pass")}]
         new_events = []
         heard = {}
@@ -804,6 +839,7 @@ class WatchRunner:
                                   "reason": info["reason"]}))
                     for ev in events:
                         self._adopt_snippet(ev, name, item["id"])
+                        self._submit_transcription(ev)
                         new_events.append(ev)
                     heard[name] = len(events)
                 except Exception as exc:
@@ -883,6 +919,100 @@ class WatchRunner:
         if rel:
             ev["snippet"] = rel
 
+    # -------------------------------------------------- transcription
+    def _start_transcription(self):
+        """Bind the bounded transcription queue when the host
+        carries the engine. Absence is a state the products
+        state, never an error. Real source only: the simulated
+        source's snippets are synthetic audio, and a machine
+        transcript of synthetic audio would be a fabrication in
+        the products, so simulated watches never transcribe."""
+        from .desks import transcription_state
+        from .transcribe import TriageQueue, WhisperEngine, Worker
+        if self.profile["source"]["kind"] != "real":
+            return
+        state, _reason = transcription_state()
+        if state != "bound":
+            return
+        self._tx_queue = TriageQueue()
+
+        def sink(job, result, error):
+            with self._tx_lock:
+                self._tx_results.append((job, result, error))
+
+        self._tx_worker = Worker(self._tx_queue, WhisperEngine(),
+                                 sink)
+        self._tx_worker.start()
+
+    def _submit_transcription(self, ev):
+        if self._tx_queue is None:
+            return
+        if not ev["data"].pop("transcribe_candidate", False):
+            return
+        rel = ev.get("snippet")
+        if not rel:
+            return
+        self._tx_queue.submit({
+            "snippet": os.path.join(self.watch_dir, rel),
+            "freq_hz": ev.get("freq_hz"),
+            "grade": ev["data"].get("voice_grade"),
+            "score": ev["data"].get("voice_score", 0),
+            "snr_db": ev["data"].get("snr_db") or 0,
+            "duration_s": ev["data"].get("duration_s") or 10.0,
+            "t": ev["t_start"], "emitter": ev.get("emitter")})
+
+    def _drain_transcripts(self):
+        if self._tx_queue is None:
+            return
+        with self._tx_lock:
+            results, self._tx_results = self._tx_results, []
+        for job, result, error in results:
+            if error is not None or not result \
+                    or not result.get("text"):
+                if error is not None:
+                    self._tx_errors += 1
+                continue
+            self._file(make_event(
+                self.watch_id, "audiocensus", "decode",
+                job["t"], job["t"], freq_hz=job["freq_hz"],
+                emitter=job["emitter"], grade="PROBABLE",
+                content="machine transcript (faster-whisper, "
+                        "unverified; inherits the snippet's "
+                        "grade %s): %s"
+                        % (job["grade"], result["text"]),
+                data={"emitter_kind": "audio_emission",
+                      "machine_transcript": True,
+                      "transcript": result["text"],
+                      "language": result.get("language"),
+                      "voice_grade": job["grade"]}))
+
+    def _stop_transcription(self):
+        if self._tx_worker is not None:
+            self._tx_worker.stop()
+            self._tx_worker = None
+        self._drain_transcripts()
+        if self._tx_queue is not None:
+            counts = dict(self._tx_queue.counts)
+            counts["budget_spent_s"] = round(
+                self._tx_queue.budget_spent_s)
+            counts["engine_errors"] = self._tx_errors
+            counts["pending_at_stand_down"] = self._tx_queue.pending()
+            self._file(make_event(
+                self.watch_id, "officer", "system",
+                self.meta["end"], self.meta["end"],
+                grade="CONFIRMED",
+                content="transcription accounting: %d submitted, "
+                        "%d transcribed, %d dropped at the gate, "
+                        "%d dropped by budget, %d dropped by "
+                        "queue, %d pending at stand-down"
+                        % (counts["submitted"], counts["transcribed"],
+                           counts["dropped_gate"],
+                           counts["dropped_budget"],
+                           counts["dropped_queue"],
+                           counts["pending_at_stand_down"]),
+                data={"transcription": counts}))
+            self._tx_queue = None
+
     def _maybe_interrupt(self, item, new_events, watch_start):
         if item["cls"] not in ("B", "C"):
             return
@@ -920,6 +1050,7 @@ class WatchRunner:
             self.meta["end_reason"] = end_reason
             end = watch_start + self._elapsed(bill)
         self.meta["end"] = end
+        self._stop_transcription()
         self.index.set_watch_meta(self.watch_id, self.meta)
         util.write_json(os.path.join(self.watch_dir, "watch.json"),
                         self.meta)

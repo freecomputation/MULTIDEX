@@ -21,8 +21,19 @@ from . import codecs, modes
 from .bands import band_name
 from .events import make_event
 
-AIRBAND_CHANNELS = [118.700e6, 119.100e6, 121.500e6, 124.350e6,
-                    126.075e6, 127.800e6]
+# VHF airband, AM: the verified local set for the deployment region
+# (approach sectors, tower, clearance, operations and guard for the
+# Army airfield whose traffic dominates this airspace). Verified
+# against the FAA airport record and the regional ATC frequency
+# listings; see the 0.2.0 research notes. The 0.1.x list held none
+# of the sector frequencies and is retired.
+AIRBAND_CHANNELS = [118.075e6, 121.100e6, 121.500e6, 125.400e6,
+                    126.200e6, 133.450e6, 133.750e6, 135.200e6]
+
+# UHF military airband, AM: the same airfield's UHF pairs, including
+# the north-sector pair and the UHF guard frequency.
+MILAIR_CHANNELS = [239.275e6, 243.000e6, 248.550e6, 270.350e6,
+                   319.250e6, 327.125e6, 336.300e6, 371.350e6]
 
 # name -> (tier, service, cpu class, channels [(freq, bw)] or "window")
 SPECS = {
@@ -30,6 +41,9 @@ SPECS = {
                   [(1090e6, 2e6)]),
     "airband":   (1, "Airband voice", "moderate",
                   [(f, 25e3) for f in AIRBAND_CHANNELS]),
+    "milair":    (1, "Military UHF airband voice", "moderate",
+                  [(f, 25e3) for f in MILAIR_CHANNELS]),
+    "audiocensus": (3, "Audio emissions census", "moderate", "window"),
     "acars":     (1, "ACARS datalink", "light",
                   [(131.45e6, 25e3), (131.55e6, 25e3), (131.725e6, 25e3)]),
     "ais":       (1, "AIS vessels", "light",
@@ -54,37 +68,46 @@ SPECS = {
 }
 
 # Desks this build benches with the reason stated, whatever the
-# profile says: the decode needs a program pure Python does not carry.
+# profile says. In 0.2.0 only HFDL remains here; the desks that
+# were benched in 0.1.x stand now, in person or through a bound
+# host tool (see CONDITIONAL_BENCHED and toolbind).
 ALWAYS_BENCHED = {
-    "vdl2": "VDL2 decode needs a dumpvdl2-class decoder program, which "
-            "this standard-library build does not bind",
-    "amateur": "SSB, CW and FT8 decode need a WSJT-X-class decoder, "
-               "outside standard-library scope; HF spectrum is still "
-               "censused by the sweep desk on every HF dwell",
-    "digitalvoice": "DMR, P25 and NXDN decode need a DSD-class vocoder, "
-                    "which this build does not bind; trunked systems "
-                    "are censused as metadata by the trunking desk",
-    "hfdl": "HFDL decode needs a dumphfdl-class decoder program, which "
-            "this build does not bind",
-    "iss": "ISS voice and SSTV decode need external decoders; ISS "
-           "passes are still predicted by the satellite ephemeris and "
-           "appear in the watch bill",
+    "hfdl": "HFDL decode stays benched in this build: the decoder "
+            "(dumphfdl) needs a SoapySDR, liquid-dsp, FFTW and "
+            "libacars chain with no user-space staging route on "
+            "this host; its channels span 3-22 MHz and need a "
+            "propagation-driven band rotation this build does not "
+            "carry; and the fixed antenna is a VHF/UHF antenna. HF "
+            "spectrum is censused by the sweep and audio census "
+            "desks on every HF dwell, and no HFDL decode is claimed",
 }
 
-# Desks this build benches on the real source only, with the reason
-# stated: the decode needs a program outside the standard library and
-# outside the host tool set the real source binds (rtl_sdr, rtl_fm,
-# rtl_power, rtl_433, multimon-ng).
-REAL_BENCHED = {
-    "acars": "ACARS decode needs an acarsdec-class decoder program; "
-             "it is not among the host tools this build binds, so on "
-             "the real source the datalink dwell is flown by the "
-             "sweep census instead",
-}
+# Desks that stand on the real source when a host decoder program
+# is present and bench with the staging instruction when it is
+# not. On the simulated source they stand (the world feeds them).
+CONDITIONAL_BENCHED = {}  # filled from toolbind below, by desk_state
 
-TRANSCRIPTION_REASON = ("no transcription engine is bound in this "
-                        "build; voice audio is filed as snippets and "
-                        "transcripts are reported as not produced")
+# Kept for callers that still import it: in 0.2.0 no desk benches
+# on the real source merely for being real - ACARS decodes in pure
+# Python from the audio path.
+REAL_BENCHED = {}
+
+TRANSCRIPTION_REASON = ("no transcription engine is bound on this "
+                        "host (the faster-whisper stack is not "
+                        "importable here); voice audio is filed as "
+                        "snippets and transcripts are reported as "
+                        "not produced")
+
+
+def transcription_state():
+    """('bound', None) when a transcription engine is importable on
+    this host, else ('benched', reason). The engine is the host's
+    faster-whisper stack; the queue that feeds it is bounded and
+    triage-gated (multidex.transcribe)."""
+    import importlib.util
+    if importlib.util.find_spec("faster_whisper") is not None:
+        return "bound", None
+    return "benched", TRANSCRIPTION_REASON
 
 
 def channels_for(name):
@@ -98,6 +121,10 @@ def desk_state(name, profile, source_kind, capabilities):
     """('standing', None) or ('benched', plain-word reason)."""
     if name in ALWAYS_BENCHED:
         return "benched", ALWAYS_BENCHED[name]
+    if source_kind == "real":
+        from .toolbind import TOOL_DESKS, tool_available
+        if name in TOOL_DESKS and not tool_available(TOOL_DESKS[name][0]):
+            return "benched", TOOL_DESKS[name][1]
     if source_kind == "real" and name in REAL_BENCHED:
         return "benched", REAL_BENCHED[name]
     if name in profile["desks"]["bench"]:
@@ -252,10 +279,18 @@ def process_adsb(feed, ctx):
 # --------------------------------------------------------------- airband
 
 def process_airband(feed, ctx):
+    return _process_voice(feed, ctx, "airband")
+
+
+def process_milair(feed, ctx):
+    return _process_voice(feed, ctx, "milair")
+
+
+def _process_voice(feed, ctx, desk):
     out = []
     guard = ctx["profile"]["flash"]["guard_hz"]
     for seg in feed.get("segments", []):
-        is_guard = abs(seg["freq_hz"] - guard) < 1.0
+        is_guard = desk == "airband" and abs(seg["freq_hz"] - guard) < 1.0
         data = {"emitter_kind": "aircraft", "snr_db": seg["snr_db"],
                 "duration_s": seg["dur_s"]}
         emitter = None
@@ -266,7 +301,7 @@ def process_airband(feed, ctx):
             data["also"] = [seg["callsign"]]
             data["heard_callsign"] = seg["callsign"]
         ev = make_event(
-            ctx["watch_id"], "airband", "alert" if is_guard else "voice",
+            ctx["watch_id"], desk, "alert" if is_guard else "voice",
             ctx["t0"] + seg["offset_s"],
             ctx["t0"] + seg["offset_s"] + seg["dur_s"],
             freq_hz=seg["freq_hz"], emitter=emitter, grade=grade,
@@ -277,16 +312,16 @@ def process_airband(feed, ctx):
                 # Real source: the snippet is the captured audio
                 # itself, carried in the feed by the Tuner Server.
                 ev["data"]["_snippet"] = {
-                    "filename": "airband-%d-%d.wav"
-                                % (int(seg["freq_hz"]),
+                    "filename": "%s-%d-%d.wav"
+                                % (desk, int(seg["freq_hz"]),
                                    int(seg["offset_s"])),
                     "kind": "voice", "b64": seg["audio_b64"]}
             else:
                 ev["data"]["_snippet"] = _snippet(
                     _wav_bytes((ctx["watch_id"], seg["freq_hz"],
                                 seg["offset_s"])),
-                    "airband-%d-%d.wav" % (int(seg["freq_hz"]),
-                                           int(seg["offset_s"])),
+                    "%s-%d-%d.wav" % (desk, int(seg["freq_hz"]),
+                                      int(seg["offset_s"])),
                     "voice")
         out.append(ev)
     return out
@@ -612,9 +647,275 @@ def process_sweep(feed, ctx):
     return out
 
 
+# ---------------------------------------------------------- audio census
+
+def _samples_wav(samples, rate=16000):
+    import io as _io
+    import struct as _struct
+    import wave as _wave
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(_struct.pack("<%dh" % len(samples), *samples))
+    return buf.getvalue()
+
+
+def process_audiocensus(feed, ctx):
+    """The universal audio census desk: every audio-bearing
+    emission the window held, demodulated and graded by the
+    census engine in the source feed. Unknown audio is reported
+    as unknown audio; a grade is a machine estimate, and no event
+    here claims decoded speech."""
+    out = []
+    for cand in feed.get("candidates", []):
+        grade_letter = cand.get("grade", "D")
+        if grade_letter is None:
+            out.append(make_event(
+                ctx["watch_id"], "audiocensus", "observation",
+                ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
+                emitter="AUDIO:%.3f MHz" % (cand["freq_hz"] / 1e6),
+                grade="UNRESOLVED",
+                content="audio-band emission detected (SNR %s dB, "
+                        "about %s Hz wide); extraction deferred "
+                        "under the per-window extraction cap"
+                        % (cand.get("snr_db"), cand.get("bw_hz")),
+                data={"emitter_kind": "audio_emission",
+                      "snr_db": cand.get("snr_db"),
+                      "bw_hz": cand.get("bw_hz"),
+                      "extraction_deferred": True}))
+            continue
+        emitter = "AUDIO:%.3f MHz" % (cand["freq_hz"] / 1e6)
+        data = {"emitter_kind": "audio_emission",
+                "modulation_estimate": cand.get("modulation"),
+                "voice_grade": grade_letter,
+                "voice_score": cand.get("score", 0),
+                "snr_db": cand.get("snr_db"),
+                "bw_hz": cand.get("bw_hz"),
+                "duration_s": cand.get("duration_s", 0.0)}
+        if cand.get("grade_parts"):
+            data["grade_parts"] = cand["grade_parts"]
+        if grade_letter == "DATA":
+            ev = make_event(
+                ctx["watch_id"], "audiocensus", "observation",
+                ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
+                emitter=emitter, grade="PROBABLE",
+                content="data emission (constant-envelope, discrete "
+                        "tones) found by the audio census; not "
+                        "voice and not graded as voice",
+                data=data)
+        elif grade_letter in ("A", "B", "C"):
+            ev = make_event(
+                ctx["watch_id"], "audiocensus", "audio",
+                ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
+                emitter=emitter,
+                grade="PROBABLE" if grade_letter in ("A", "B")
+                else "UNRESOLVED",
+                content="unknown audio emission: modulation "
+                        "estimated %s, voice likelihood grade %s "
+                        "(%d/100, machine estimate), SNR %s dB, "
+                        "about %s s in the sampled slice; audio "
+                        "filed, not decoded by any named desk"
+                        % (cand.get("modulation"), grade_letter,
+                           cand.get("score", 0), cand.get("snr_db"),
+                           cand.get("duration_s", 0.0)),
+                data=data)
+            if cand.get("audio"):
+                ev["data"]["_snippet"] = _snippet(
+                    _samples_wav(cand["audio"]),
+                    "audiocensus-%d.wav" % int(cand["freq_hz"]),
+                    "voice")
+                if grade_letter == "A":
+                    ev["data"]["transcribe_candidate"] = True
+        else:
+            ev = make_event(
+                ctx["watch_id"], "audiocensus", "observation",
+                ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
+                emitter=emitter, grade="UNRESOLVED",
+                content="audio-band energy graded D by the audio "
+                        "census (score %d/100): consistent with "
+                        "noise or a burst, no snippet filed"
+                        % cand.get("score", 0),
+                data=data)
+        out.append(ev)
+    if feed.get("carriers"):
+        out.append(make_event(
+            ctx["watch_id"], "audiocensus", "observation",
+            ctx["t0"], ctx["t1"], freq_hz=ctx.get("freq_hz"),
+            grade="UNRESOLVED",
+            content="%d narrow carrier(s) under 400 Hz wide in "
+                    "this window: census log only, no audio "
+                    "extracted" % feed["carriers"],
+            data={"emitter_kind": "carrier",
+                  "carriers": feed["carriers"]}))
+    if feed.get("over_cap"):
+        out.append(make_event(
+            ctx["watch_id"], "audiocensus", "observation",
+            ctx["t0"], ctx["t1"], freq_hz=ctx.get("freq_hz"),
+            grade="CONFIRMED",
+            content="%d further emission(s) in this window were "
+                    "census-counted only: the per-window "
+                    "extraction cap was reached"
+                    % feed["over_cap"],
+            data={"emitter_kind": "audio_emission",
+                  "over_cap": feed["over_cap"]}))
+    return out
+
+
+# ------------------------------------------------------------- amateur
+
+def process_amateur(feed, ctx):
+    out = []
+    for sig in feed.get("cw", []):
+        text = sig.get("text", "")
+        emitter = None
+        import re as _re
+        m = _re.search(r"DE ([A-Z0-9/]{3,})", text)
+        if m:
+            emitter = m.group(1)
+        out.append(make_event(
+            ctx["watch_id"], "amateur", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=sig.get("freq_hz"), emitter=emitter,
+            grade="PROBABLE",
+            content="CW decoded at about %s wpm (machine decode, "
+                    "element confidence %s; unresolved characters "
+                    "are marked ?): %s"
+                    % (sig.get("wpm"), sig.get("confidence"), text),
+            data={"emitter_kind": "amateur_station",
+                  "mode": "CW", "snr_db": sig.get("snr_db"),
+                  "wpm": sig.get("wpm"),
+                  "confidence": sig.get("confidence"),
+                  "text": text}))
+    for dec in feed.get("ft8", []):
+        out.append(make_event(
+            ctx["watch_id"], "amateur", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=dec.get("freq_hz"), grade="CONFIRMED",
+            content="FT8 decoded by the bound jt9 program: %s"
+                    % dec.get("text"),
+            data={"emitter_kind": "amateur_station", "mode": "FT8",
+                  "snr_db": dec.get("snr_db"), "dt_s": dec.get("dt_s"),
+                  "text": dec.get("text")}))
+    return out
+
+
+# ----------------------------------------------------------------- ISS
+
+def process_iss(feed, ctx):
+    out = []
+    p = ctx.get("pass") or {}
+    sat = p.get("sat", "ISS")
+    for seg in feed.get("segments", []):
+        ev = make_event(
+            ctx["watch_id"], "iss", "voice",
+            ctx["t0"] + seg.get("offset_s", 0),
+            ctx["t0"] + seg.get("offset_s", 0) + seg.get("dur_s", 0),
+            freq_hz=145.8e6, emitter=sat, grade="PROBABLE",
+            content="voice activity on the ISS downlink during "
+                    "the pass; audio filed as a snippet, not "
+                    "transcribed by this desk",
+            data={"emitter_kind": "satellite", "sat": sat,
+                  "snr_db": seg.get("snr_db"),
+                  "duration_s": seg.get("dur_s")})
+        if seg.get("audio_b64"):
+            ev["data"]["_snippet"] = {
+                "filename": "iss-%d.wav" % int(seg.get("offset_s", 0)),
+                "kind": "voice", "b64": seg["audio_b64"]}
+        out.append(ev)
+    img = feed.get("sstv")
+    if img:
+        ev = make_event(
+            ctx["watch_id"], "iss", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=145.8e6, emitter=sat, grade="CONFIRMED",
+            content="SSTV image decoded from the ISS downlink: "
+                    "%s, %d of %d lines recovered; the image is "
+                    "filed as received, unretouched"
+                    % (img.get("mode"), img.get("lines", 0),
+                       img.get("height", 0)),
+            data={"emitter_kind": "satellite", "sat": sat,
+                  "sstv_mode": img.get("mode"),
+                  "lines": img.get("lines")})
+        import base64 as _b64
+        ev["data"]["_snippet"] = {
+            "filename": "iss-sstv-%d.png" % int(ctx["t0"]),
+            "kind": "image",
+            "b64": _b64.b64encode(img["png"]).decode("ascii")
+            if isinstance(img.get("png"), (bytes, bytearray))
+            else img.get("png_b64")}
+        out.append(ev)
+    if not out and feed.get("attempted"):
+        out.append(make_event(
+            ctx["watch_id"], "iss", "observation", ctx["t0"],
+            ctx["t1"], freq_hz=145.8e6, emitter=sat,
+            grade="UNRESOLVED",
+            content="ISS pass flown with the receiver on the "
+                    "downlink; no voice and no SSTV decoded this "
+                    "pass (the station is silent on most passes)",
+            data={"emitter_kind": "satellite", "sat": sat}))
+    return out
+
+
+# ----------------------------------------------------------------- VDL2
+
+def process_vdl2(feed, ctx):
+    out = []
+    for msg in feed.get("messages", []):
+        out.append(make_event(
+            ctx["watch_id"], "vdl2", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=136.975e6, emitter=msg.get("tail"),
+            grade="CONFIRMED",
+            content="VDL2 decoded by the bound dumpvdl2 program: "
+                    "%s" % msg.get("text"),
+            data={"emitter_kind": "aircraft",
+                  "tail": msg.get("tail"),
+                  "text": msg.get("text"), "raw": msg.get("raw")}))
+    for burst in feed.get("bursts", []):
+        out.append(make_event(
+            ctx["watch_id"], "vdl2", "observation", ctx["t0"],
+            ctx["t1"], freq_hz=136.975e6, grade="UNRESOLVED",
+            content="VDL2-shaped burst energy on 136.975 MHz "
+                    "(burst census; no frame decoded in this "
+                    "capture)", data={"emitter_kind": "aircraft",
+                                       "burst": burst}))
+    return out
+
+
+# --------------------------------------------------------- digital voice
+
+def process_digitalvoice(feed, ctx):
+    """Metadata only, by design and by licence: this desk reports
+    the signalling a DSD-FME-class program decodes - system,
+    talkgroup, source, slot, encryption flag. It does not decode
+    voice: intelligible DMR/P25/NXDN voice needs an AMBE-family
+    vocoder this build does not carry, and no event here claims
+    otherwise."""
+    out = []
+    for call in feed.get("calls", []):
+        enc = "encrypted" if call.get("encrypted") else "in the clear"
+        out.append(make_event(
+            ctx["watch_id"], "digitalvoice", "decode", ctx["t0"],
+            ctx["t1"], freq_hz=call.get("freq_hz"),
+            emitter=call.get("system"), grade="CONFIRMED",
+            content="%s signalling decoded (metadata only): "
+                    "talkgroup %s, source %s, slot %s, call %s; "
+                    "voice is not decoded by this build - no "
+                    "AMBE vocoder is bound"
+                    % (call.get("protocol"), call.get("talkgroup"),
+                       call.get("source"), call.get("slot"), enc),
+            data={"emitter_kind": "radio_system",
+                  "protocol": call.get("protocol"),
+                  "talkgroup": call.get("talkgroup"),
+                  "source": call.get("source"),
+                  "slot": call.get("slot"),
+                  "encrypted": bool(call.get("encrypted")),
+                  "voice_decoded": False}))
+    return out
+
+
 PROCESS = {
     "adsb": process_adsb,
     "airband": process_airband,
+    "milair": process_milair,
     "acars": process_acars,
     "ais": process_ais,
     "wxradio": process_wxradio,
@@ -627,4 +928,9 @@ PROCESS = {
     "trunking": process_trunking,
     "broadcast": process_broadcast,
     "sweep": process_sweep,
+    "audiocensus": process_audiocensus,
+    "amateur": process_amateur,
+    "iss": process_iss,
+    "vdl2": process_vdl2,
+    "digitalvoice": process_digitalvoice,
 }

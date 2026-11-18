@@ -29,8 +29,9 @@ DEFAULTS = {
         "disk_ceiling_gb": 20,
     },
     "rotation": {
-        "adsb":     {"weight": 10, "dwell_s": 150},
-        "airband":  {"weight": 9,  "dwell_s": 600},
+        "adsb":     {"weight": 16, "dwell_s": 120},
+        "airband":  {"weight": 20, "dwell_s": 120},
+        "milair":   {"weight": 10, "dwell_s": 90},
         "datalink": {"weight": 6,  "dwell_s": 300},
         "marine":   {"weight": 6,  "dwell_s": 300},
         "aprs":     {"weight": 4,  "dwell_s": 240},
@@ -44,9 +45,10 @@ DEFAULTS = {
         "hf_night": {"weight": 4,  "dwell_s": 300},
     },
     "desks": {
-        "stand": ["adsb", "airband", "acars", "ais", "wxradio", "ism",
-                  "aprs", "pager", "sweep", "satellite", "sonde",
-                  "cellular", "trunking", "broadcast"],
+        "stand": ["adsb", "airband", "milair", "acars", "ais", "wxradio",
+                  "ism", "aprs", "pager", "sweep", "satellite", "sonde",
+                  "cellular", "trunking", "broadcast", "audiocensus",
+                  "amateur", "iss", "vdl2", "digitalvoice"],
         "bench": [],
     },
     "flash": {

@@ -351,15 +351,20 @@ def test_bench_reasons_unifies_all_sources(profile):
     """bench_reasons combines capability, muster and supervisor
     benches into the one set every surface reads."""
     caps = {"sweep", "adsb", "ais", "wxradio", "ism", "aprs", "pager",
-            "satellite", "sonde", "broadcast", "cellular", "trunking"}
+            "satellite", "sonde", "broadcast", "cellular", "trunking",
+            "acars", "airband", "milair", "audiocensus", "amateur",
+            "iss"}
     out = desks_mod.bench_reasons(
         profile, "real", caps,
         extra_bench={"satellite": "ephemeris bench (test)"},
         supervisor_benched={"pager": "crashed twice (test)"})
-    assert out["acars"].startswith("ACARS decode needs")
+    # 0.2.0: acars stands in pure Python; vdl2 benches conditionally
+    # on the dumpvdl2 host tool with its staging instruction.
+    assert "acars" not in out
     assert out["satellite"] == "ephemeris bench (test)"
     assert out["pager"] == "crashed twice (test)"
-    assert out["vdl2"].startswith("VDL2 decode needs")
+    assert out["vdl2"].startswith("VDL2 decode binds the dumpvdl2")
+    assert out["hfdl"].startswith("HFDL decode stays benched")
     assert "adsb" not in out
 
 

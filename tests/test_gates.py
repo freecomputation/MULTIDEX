@@ -69,9 +69,15 @@ def test_real_source_benches_itself_without_tools():
         caps = source.capabilities()
         for desk in ("adsb", "ais", "pager", "ism", "airband",
                      "wxradio", "aprs", "sonde", "broadcast",
-                     "cellular", "trunking", "satellite", "sweep"):
+                     "cellular", "trunking", "satellite", "sweep",
+                     "acars", "milair", "audiocensus", "amateur",
+                     "iss"):
             assert desk in caps, desk
-        assert "acars" not in caps
+        # Tool-bound desks appear only when their program does.
+        import shutil as _sh
+        assert ("vdl2" in caps) == (_sh.which("dumpvdl2") is not None)
+        assert ("digitalvoice" in caps) == (_sh.which("dsd-fme")
+                                            is not None)
 
 
 def test_doctor_text_lists_tiers(profile, home):
@@ -80,4 +86,7 @@ def test_doctor_text_lists_tiers(profile, home):
     assert "satellite (tier 2" in text
     assert "sweep (tier 3" in text
     assert "benched" in text
-    assert "transcription: benched" in text
+    # Transcription state is host-dependent in 0.2.0: bound when the
+    # faster-whisper stack is importable, benched with reason else.
+    assert ("transcription: benched" in text
+            or "transcription: bound" in text)
