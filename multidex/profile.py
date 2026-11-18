@@ -57,6 +57,10 @@ DEFAULTS = {
         "dwell_s": 600,
         "min_observations": 2,
     },
+    "retro": {
+        "max_captures_per_watch": 25,
+        "max_seconds_per_watch": 120,
+    },
     "applicability": {
         "marine_range_km": 100,
         "force_stand": [],
@@ -227,6 +231,17 @@ def _hard_problems(profile):
                         "at least 1; a candidate is by definition "
                         "heard at least twice, and a value under 1 "
                         "would bill stares at single hearings")
+    retro = profile.get("retro", {})
+    if retro is not None and not isinstance(retro, dict):
+        hard.append("retro section is not a table")
+    elif isinstance(retro, dict):
+        for key in ("max_captures_per_watch",
+                    "max_seconds_per_watch"):
+            value = retro.get(key)
+            if value is not None and (not _is_number(value)
+                                      or value <= 0):
+                hard.append("retro %s must be a positive number"
+                            % key)
     transcription = profile.get("transcription", {})
     if isinstance(transcription, dict):
         for name in transcription.get("desks", []) or []:

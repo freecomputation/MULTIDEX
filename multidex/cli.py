@@ -1,8 +1,12 @@
-"""The command surface: seven verbs and nothing else (design 11).
+"""The command surface (design 11).
 
 No verb asks a question back. Anything a verb needs comes from the
 profile, the defaults, or its arguments; anything it cannot get is a
-refusal with the reason.
+refusal with the reason. The set the design named was watch, plan,
+status, sitrep, stop, ask and doctor; the live update system added
+update, and retroactive exploitation (0.12.0) adds reprocess by
+name: the verb set grows by that one verb, and this docstring says
+so rather than letting the count drift.
 """
 
 import argparse
@@ -273,6 +277,51 @@ def cmd_doctor(args):
     return 0 if "FAIL" not in text else 1
 
 
+def cmd_reprocess(args):
+    """Run a retroactive exploitation pass over the archive now.
+
+    The operator's direct ask runs the debt off unbounded,
+    where a watch's automatic passes stay inside the per-watch
+    budget. The one-writer rule still holds: while a watch
+    stands, its officer runs the passes at muster and at dwell
+    boundaries, and this verb refuses rather than file into
+    the Index beside it."""
+    home = _home(args)
+    profile = _load(args, home)
+    live_id, _claimed = products.watch_liveness(home)
+    if live_id:
+        print("Watch %s is running in this home; its officer "
+              "runs the retroactive passes at muster and at "
+              "dwell boundaries under the one-writer rule. The "
+              "reprocess verb works the archive only while no "
+              "watch stands." % live_id)
+        return 1
+    from . import budget as _budget_mod
+    from . import retro as _retro_mod
+    index = Index(home)
+    try:
+        alloc = None
+        try:
+            alloc = _budget_mod.AllocationLedger.load(home)
+        except Exception:
+            alloc = None
+        rp = _retro_mod.RetroPass(index, home, profile,
+                                  allocation_ledger=alloc)
+        plan = rp.plan(time.time())
+        account = rp.step(time.time())
+        print("Retroactive exploitation pass: %s."
+              % _retro_mod.account_sentence(
+                  account, seeded=plan["seeded"]))
+        for name in sorted(account["per_decoder"]):
+            cell = account["per_decoder"][name]
+            print("Decoder %s: %d examined, %d retroactive "
+                  "events filed." % (name, cell["examined"],
+                                     cell["found"]))
+        return 0
+    finally:
+        index.close()
+
+
 def cmd_update(args):
     from . import updater
     home = _home(args)
@@ -344,6 +393,10 @@ def main(argv=None):
     p_ask.set_defaults(fn=cmd_ask)
     sub.add_parser("doctor", help="muster checks and desk inventory") \
         .set_defaults(fn=cmd_doctor)
+    sub.add_parser("reprocess", help="run a retroactive "
+                                     "exploitation pass over "
+                                     "the archive now") \
+        .set_defaults(fn=cmd_reprocess)
     p_update = sub.add_parser(
         "update", help="live updates: check, status, approve, "
                        "reset, rollback")

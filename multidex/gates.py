@@ -273,6 +273,45 @@ def doctor_text(profile, home):
     except Exception as exc:
         lines.append("Evidence by tier: could not be read "
                      "(%s: %s)" % (type(exc).__name__, exc))
+    # Retroactive exploitation (0.12.0): the capability
+    # manifest stated from the registry itself, and this
+    # home's account against it - what the current decoder
+    # versions have examined, what they found late, and what
+    # stands owed.
+    from . import retro as _retro_mod
+    lines.append("Retroactive exploitation: every decoder "
+                 "improvement is owed to the archive. The "
+                 "registered decoders are:")
+    lines.extend(_retro_mod.manifest_lines())
+    try:
+        import os as _os
+        if _os.path.exists(_os.path.join(home, "index.sqlite")):
+            from .index import Index as _Index
+            _idx = _Index(home)
+            try:
+                _ledger = _retro_mod.ProcessedLedger.load(home)
+                _owed = _retro_mod.owed_counts(_idx)
+                for _entry in _retro_mod.manifest():
+                    _counts = _ledger.counts(_entry["name"],
+                                             _entry["version"])
+                    _found = len(_ledger.found_event_ids(
+                        _entry["name"], _entry["version"]))
+                    lines.append(
+                        "Retroactive account, %s version %s: "
+                        "%d captures examined by this version "
+                        "(%d filed retroactive events, %d "
+                        "already exploited, %d errors); %d "
+                        "captures stand owed to it."
+                        % (_entry["name"], _entry["version"],
+                           sum(_counts.values()), _found,
+                           _counts.get(_retro_mod.ALREADY, 0),
+                           _counts.get(_retro_mod.ERROR, 0),
+                           _owed.get(_entry["name"], 0)))
+            finally:
+                _idx.close()
+    except Exception as exc:
+        lines.append("Retroactive account: could not be read "
+                     "(%s: %s)" % (type(exc).__name__, exc))
     from . import updater as _updater
     lines.extend(_updater.doctor_lines(home, profile))
     return "\n".join(lines)

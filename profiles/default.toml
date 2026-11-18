@@ -96,6 +96,19 @@ dwell_s = 600
 # hearing is a census row, not a target.
 min_observations = 2
 
+[retro]
+# Retroactive exploitation (0.12.0): when a decoder's capability
+# changes, the improvement is owed to the archive - the decoder
+# re-runs over every retained capture its current version has
+# not examined, inside this per-watch budget, spent at muster
+# and at dwell boundaries so no billed dwell is ever delayed.
+# What the budget does not reach stays owed, is stated as owed
+# in status and in the Watch Report, and carries to the next
+# watch. The reprocess verb runs the same pass unbounded at the
+# operator's direct ask, while no watch stands.
+max_captures_per_watch = 25
+max_seconds_per_watch = 120
+
 [applicability]
 # Applicability (0.9.0): at muster the officer judges every desk
 # against the home position and stands down the desks whose targets

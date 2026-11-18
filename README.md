@@ -14,11 +14,11 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.11.0.
+Version 0.12.0.
 
 ## The verbs
 
-The whole command surface is eight verbs. No verb prompts for input;
+The whole command surface is nine verbs. No verb prompts for input;
 anything a verb needs comes from the profile or its arguments, and
 anything it cannot get is a refusal with the reason in plain words.
 
@@ -73,6 +73,14 @@ anything it cannot get is a refusal with the reason in plain words.
   implementation replaces it; the census is printed from the
   binding table itself, and the test suite asserts it names
   every program the package source invokes.
+- `multidex reprocess` - run a retroactive exploitation pass over
+  the archive now: every decoder whose current version has not
+  examined a retained capture it consumes re-runs over it, and
+  what it finds files as retroactive events linked to the
+  original captures. The verb refuses while a watch stands,
+  because the standing watch's officer runs the same passes at
+  muster and at dwell boundaries under the one-writer rule. The
+  verb set grows by this one verb in 0.12.0; it was eight.
 
 Run it from this tree with `./bin/multidex`, or as a module with
 `python3 -m multidex`. Global options come before the verb:
@@ -342,6 +350,73 @@ day, with the fold that clusters stated plainly. These are
 computations over the existing record, cheap and exact, and
 they are shared groundwork for the anomaly register that follows
 this build.
+
+## Retroactive exploitation
+
+The archive is permanent and the decoders keep improving, so
+every improvement is owed to the past as well as the future.
+Each decoder the system owns registers itself in a capability
+manifest in the code: a stable name, the desk that owns it, a
+version string the desk bumps when its capability changes, the
+snippet kinds it consumes, and the frequency range or channels
+it targets. A processed ledger in the home, beside the Index,
+records for each decoder version the set of captures it has
+already examined, keyed by the snippet's own identity in the
+store; it survives watches and updates and is never reset by a
+version landing. At muster the officer diffs the manifest
+against the ledger. A decoder that is new, or whose version is
+new, owes a pass over every retained capture matching its
+registration that its current version has not examined. A
+version bump therefore re-runs the bumped decoder over its
+full matching archive, and only that decoder; a registration
+that narrows un-files nothing; and a capture the retention
+tiers have shed is absent from the store and simply not owed,
+because the owed computation reads the store as it stands.
+
+The pass is bounded: a per-watch budget of captures and of
+officer seconds, set in the profile's retro section, spent at
+muster and at dwell boundaries so a billed dwell is never
+delayed for old material. The ledger is written as captures
+complete, so an interrupted pass loses nothing already done,
+and what the budget does not reach stays owed - stated as owed
+in status and in the Watch Report's retroactive account, and
+carried to the next watch. The reprocess verb runs the same
+pass unbounded at the operator's direct ask, while no watch
+stands. Doctor states the manifest and the home's account
+against it: examined, found, and owed, per decoder.
+
+What a decoder finds in an old capture files as a new event
+under the watch that filed the capture: the decode itself,
+graded by the decoder's normal rules, linked to the original
+event, and stamped with the retroactive mark, the decoder's
+name and version, the source snippet's identity, and the
+capture's original time beside the time it was found. The
+original event is never modified, and a retroactive decode
+that names an emitter updates its dossier through the Index's
+normal path. A pass that examines a capture and finds nothing
+files no per-capture event; the pass's summary carries the
+counts. The probe desk's stricter rule is kept: a retroactive
+attempt on a capture a probe stare filed, finding nothing,
+files the negative result in the probe's own shape, linked to
+the stare. Captures a decoder's product already covers - a
+pass whose imagery the desk already decoded, an excerpt the
+probe already classified - are not owed at all; the pass seeds
+them into the ledger as already exploited, so the debt is only
+ever real work.
+
+Three decoders are registered at this version. The APT imagery
+decoder re-runs over filed satellite pass audio and files the
+decoded image as an imagery event beside its pass. The
+feature-tree classifier re-runs over retained SigMF channel
+excerpts and files its classification as an assessment against
+the hearing the excerpt was retained with. The ACARS physical
+layer re-runs over retained excerpts near an ACARS channel and
+files a decode event for each verified frame, in the ACARS
+desk's own shape. Products a pass files go through the snippet
+store under the standing ceiling, as live products do; the
+pass draws no reception grant, because grants are taken at
+muster for planned receptions and a retroactive product is not
+a reception.
 
 ## Desk roster
 

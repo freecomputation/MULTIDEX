@@ -18,7 +18,7 @@ import threading
 import time
 
 from . import applicability, budget, displayfeed, gates, orbit, \
-    probe, products, retention, updater, util
+    probe, products, retention, retro, updater, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -276,6 +276,11 @@ class WatchRunner:
         self.supervisor = Supervisor()
         self.exploit = None
         self.extra_bench = {}
+        # Retroactive exploitation (0.12.0): this watch's pass
+        # over the archive and the per-watch budget it spends
+        # from, opened at muster or on resume.
+        self._retro = None
+        self._retro_pool = None
         # Applicability (0.9.0): the desks this watch's muster
         # stood down at the home, {desk: reason}. Set at muster,
         # restored from the watch meta on resume.
@@ -761,6 +766,12 @@ class WatchRunner:
         # probation on this watch.
         self._drain_update_events(start)
         self._begin_probation_if_marked(start)
+        # Retroactive exploitation opens its account at muster:
+        # the archive's debt is planned against the decoder
+        # manifest and the muster slice of the budget is spent
+        # before the first dwell, so the first state the
+        # operator reads already carries what is owed.
+        self._start_retro(start)
         # The first state the operator can read: published at muster,
         # before the first dwell runs, carrying this officer's pid
         # and heartbeat from the start.
@@ -939,6 +950,12 @@ class WatchRunner:
                 grade="CONFIRMED",
                 data={"desk": name, "stood_down": True,
                       "reason": self.stood_down_desks[name]}))
+        # A resumed watch reopens the retroactive account from
+        # the store and the processed ledger as they stand: the
+        # debt is a property of the home, and the resume plans
+        # it afresh rather than inheriting the dead officer's
+        # plan.
+        self._start_retro(resume_t)
         # Dwells already executed are known by their dwell records:
         # a dwell interrupted mid-flight by the crash has no record
         # boundary confusion - it is re-flown only if it never filed
@@ -1215,6 +1232,10 @@ class WatchRunner:
         }
         if self.ledger is not None:
             state["budget"] = self._pool_state()
+        if self._retro is not None:
+            owed = self._retro.owed_remaining()
+            if owed:
+                state["retro_owed"] = owed
         util.write_json(os.path.join(self.watch_dir, "state.json"), state)
 
     def _execute(self, item, watch_start, actual_start=None):
@@ -1749,6 +1770,81 @@ class WatchRunner:
                                    ev["t_start"] + interrupt["dur"])
             return
 
+    # --------------------------------------- retroactive exploitation
+    def _start_retro(self, t):
+        """Open this watch's retroactive exploitation account
+        (0.12.0): plan the archive's debt against the decoder
+        manifest, seed the captures a decoder's product
+        already covers, and spend the muster slice of the
+        per-watch budget - a few captures, a few seconds - so
+        the first dwell is never held for old material. The
+        slice's summary files here; what it does not reach is
+        worked at dwell boundaries and stated as owed."""
+        self._retro = None
+        self._retro_pool = None
+        try:
+            candidate = retro.RetroPass(
+                self.index, self.home, self.profile,
+                allocation_ledger=self.ledger)
+            plan = candidate.plan(t)
+        except Exception:
+            return  # the pass never stands between a watch
+            # and its muster; the debt is replanned next watch
+        self._retro = candidate
+        rcfg = self.profile.get("retro") or {}
+        self._retro_pool = {
+            "captures": int(rcfg.get("max_captures_per_watch", 25)),
+            "seconds": float(rcfg.get("max_seconds_per_watch",
+                                     120))}
+        account = self._retro_slice(
+            t, min(5, self._retro_pool["captures"]),
+            min(20.0, self._retro_pool["seconds"]))
+        if account["examined"] or plan["seeded"] \
+                or account["owed_after"]:
+            self._file(make_event(
+                self.watch_id, "officer", "system", t, t,
+                grade="CONFIRMED",
+                content="retroactive exploitation at muster: %s"
+                        % retro.account_sentence(
+                            account, seeded=plan["seeded"]),
+                data={"retroactive_account": account,
+                      "retro_seeded": plan["seeded"],
+                      "retro_owed_at_muster": plan["owed"]}))
+
+    def _retro_slice(self, t, max_captures, max_seconds):
+        """Run one slice of the pass and charge it against the
+        watch's retroactive budget. Product events file
+        through the Index under the watches that filed the
+        captures; the summary is the caller's to file."""
+        account = self._retro.step(
+            t, max_captures=max_captures,
+            max_seconds=max_seconds, filer=self.index.add_event)
+        self._retro_pool["captures"] -= account["used_captures"]
+        self._retro_pool["seconds"] -= account["used_seconds"]
+        return account
+
+    def _retro_boundary(self, t):
+        """Spend a dwell-boundary slice of the retroactive
+        budget: the debt is worked down between dwells, and a
+        slice that examined anything files its summary."""
+        if self._retro is None or self._retro_pool is None \
+                or self._retro.done():
+            return
+        if self._retro_pool["captures"] <= 0 \
+                or self._retro_pool["seconds"] <= 0:
+            return
+        account = self._retro_slice(
+            t, min(10, self._retro_pool["captures"]),
+            min(20.0, self._retro_pool["seconds"]))
+        if account["examined"]:
+            self._file(make_event(
+                self.watch_id, "officer", "system", t, t,
+                grade="CONFIRMED",
+                content="retroactive exploitation at a dwell "
+                        "boundary: %s"
+                        % retro.account_sentence(account),
+                data={"retroactive_account": account}))
+
     # -------------------------------------------------- live updates
     def _drain_update_events(self, t):
         """File the update stages the check worker queued in
@@ -1977,10 +2073,12 @@ class WatchRunner:
         """The dwell-boundary hook: probation first, then the
         update boundary - due checks spawn, queued stages
         file, and a written activation or rollback request is
-        considered for handover."""
+        considered for handover - then a retroactive
+        exploitation slice inside its remaining budget."""
         self._probation_after_item(item, position)
         if next_idx < len(bill):
             self._update_boundary(bill, next_idx, position)
+        self._retro_boundary(position)
 
     def _profile_path_for_worker(self):
         env = os.environ.get("MULTIDEX_PROFILE_PATH")

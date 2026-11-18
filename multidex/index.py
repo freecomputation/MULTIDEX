@@ -438,6 +438,17 @@ class Index:
         ev["data"] = json.loads(ev.pop("data_json"))
         return ev
 
+    def snippet_row(self, snippet_id):
+        """One snippet row by its own identity, or None: the
+        retroactive pass reads the store through this, so a
+        capture's state is the store's current fact, never the
+        plan's memory of it."""
+        row = self.db.execute(
+            "SELECT id, watch_id, desk, kind, path, bytes, shed, "
+            "t, sealed FROM snippets WHERE id=?",
+            (snippet_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     def _pick_victim(self, watch_id):
         """The next shed victim under the tier law (0.10.0):
         the highest tier still holding candidates goes first -
@@ -595,7 +606,7 @@ class Index:
         exactly as the rows do). Each row carries its retention
         tier, computed from its kind and filename."""
         rows = self.db.execute(
-            "SELECT desk, kind, path, bytes, shed, t, sealed "
+            "SELECT id, desk, kind, path, bytes, shed, t, sealed "
             "FROM snippets WHERE watch_id=? ORDER BY t ASC",
             (watch_id,)).fetchall()
         out = []
@@ -611,7 +622,7 @@ class Index:
         watch ids and tiers: the home-wide retention account
         doctor states."""
         rows = self.db.execute(
-            "SELECT watch_id, desk, kind, path, bytes, shed, t, "
+            "SELECT id, watch_id, desk, kind, path, bytes, shed, t, "
             "sealed FROM snippets ORDER BY t ASC").fetchall()
         out = []
         for r in rows:
