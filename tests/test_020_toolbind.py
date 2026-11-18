@@ -54,7 +54,12 @@ def test_dsd_fme_parser_with_stub(stub_tools):
         "dsd-fme",
         "echo 'DMR BS DCC:1 TG: 100 SRC: 123456 SLOT: 1 voice'\n"
         "echo 'P25 NAC: 0x123 Talkgroup: 200 SRC: 777'")
-    calls = tuner._run_dsd_fme(851750000.0, 0.5)
+    # Since 0.6.0 the run returns the whole feed: the calls the
+    # parser read, plus the frame archives harvested from the
+    # program's mbe data files (the shell stub writes none).
+    feed = tuner._run_dsd_fme(851750000.0, 0.5)
+    calls = feed["calls"]
+    assert feed["frame_archives"] == []
     protos = {c["protocol"] for c in calls}
     assert "DMR" in protos
     dmr = [c for c in calls if c["protocol"] == "DMR"][0]

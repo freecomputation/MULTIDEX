@@ -267,17 +267,11 @@ class WatchRunner:
         self.ledger = None
         self.grants = {}
         self._grant_statements = []
-        self._lrpt_pending = set()
         self._bill_cls = {}
         self._held = {}
         self._held_by_desk = {}
         self._held_total = 0
         self._shed_total = 0
-        # Post-pass LRPT decode (bounded background step).
-        self._lrpt_queue = None
-        self._lrpt_worker = None
-        self._lrpt_results = []
-        self._lrpt_lock = threading.Lock()
 
     # ------------------------------------------------------------ helpers
     def _resolve_source(self, watch_start):
@@ -474,7 +468,6 @@ class WatchRunner:
         self.supervisor.set_watch_dir(self.watch_dir)
         self.exploit = Exploit(self.index, profile)
         self._start_transcription()
-        self._start_lrpt_decode()
         bill = build_bill(profile, start, sats)
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
         # Reception containment: this watch's allocations are
@@ -566,6 +559,12 @@ class WatchRunner:
                 grade="CONFIRMED",
                 content="reception allocations: %s" % statement,
                 data={"reception_orphans_released": statement}))
+        for statement in self.ledger.load_statements:
+            self._file(make_event(
+                watch_id, "officer", "system", start, start,
+                grade="CONFIRMED",
+                content="reception allocations: %s" % statement,
+                data={"reception_policy_release": statement}))
         for statement in self._grant_statements:
             self._file(make_event(
                 watch_id, "officer", "system", start, start,
@@ -667,7 +666,6 @@ class WatchRunner:
                                     for i in bill
                                     if i["id"] in self.grants],
                          "statements": self._grant_statements})
-        self._start_lrpt_decode()
         source = self._source_for_meta(meta, meta["start"])
         self.source_note = meta.get("source_note")
         # The muster gates re-run on resume: the footing is verified
@@ -708,6 +706,12 @@ class WatchRunner:
                     % state.get("next_index", 0), grade="CONFIRMED",
             data={"resumed": True}))
         budget.refresh_reserves(self.ledger, profile, sats, resume_t)
+        for statement in self.ledger.load_statements:
+            self._file(make_event(
+                watch_id, "officer", "system", resume_t, resume_t,
+                grade="CONFIRMED",
+                content="reception allocations: %s" % statement,
+                data={"reception_policy_release": statement}))
         for statement in self._grant_statements:
             self._file(make_event(
                 watch_id, "officer", "system", resume_t, resume_t,
@@ -830,12 +834,8 @@ class WatchRunner:
 
     def _close_item_grant(self, item, now):
         """Release a finished dwell's or pass's unspent grant
-        back to the standing pool. A pass whose LRPT decode is
-        still pending keeps its grant until the decode files:
-        the imagery is part of that pass's reception."""
+        back to the standing pool."""
         if self.ledger is None:
-            return
-        if item["id"] in self._lrpt_pending:
             return
         grant = self.grants.get(item["id"])
         if grant is None or grant.get("status") != "open":
@@ -979,7 +979,6 @@ class WatchRunner:
 
     def _execute(self, item, watch_start, actual_start=None):
         self._drain_transcripts()
-        self._drain_lrpt()
         planned_start = item["start"]
         t0 = actual_start if actual_start is not None else planned_start
         t1 = t0 + item["dur"]
@@ -1003,25 +1002,6 @@ class WatchRunner:
             pdesk = "iss" if "iss" in item["desks"] else "satellite"
             vfo = {"desk": pdesk, "freq_hz": item["center_hz"],
                    "bw_hz": 150e3, "pass": item.get("pass")}
-            if pdesk == "satellite" and self.ledger is not None \
-                    and budget.downlink_kind(
-                        (item.get("pass") or {}).get("sat")) == "lrpt":
-                # The LRPT capture's byte cap is this item's
-                # reception grant minus the decoded image's
-                # allowance: the capture stops at the grant,
-                # inside the tuner, not at the disk ceiling.
-                grant = self.grants.get(item["id"])
-                alloc = grant["bytes"] if grant else None
-                if alloc is not None:
-                    # Normally the cap is the allocation minus the
-                    # decoded image's allowance. A reservation
-                    # degraded below that allowance gives the
-                    # allowance up instead: the capture still gets
-                    # its floored room and truncates there.
-                    vfo["byte_cap"] = (
-                        alloc - budget.LRPT_PNG_ALLOWANCE
-                        if alloc > budget.LRPT_PNG_ALLOWANCE
-                        else alloc)
             vfos = [vfo]
         new_events = []
         heard = {}
@@ -1106,7 +1086,6 @@ class WatchRunner:
                     for ev in events:
                         self._adopt_snippet(ev, name, item["id"])
                         self._submit_transcription(ev)
-                        self._submit_lrpt(ev, item["id"])
                         new_events.append(ev)
                     heard[name] = len(events)
                 except Exception as exc:
@@ -1181,11 +1160,11 @@ class WatchRunner:
         src = payload.get("file")
         if src is not None:
             # A file payload: the evidence already exists on disk.
-            # A full-pass LRPT recording is hundreds of megabytes -
-            # far too large to ride the feed as base64 - so it moves
-            # by reference and its size is read from the file. The
-            # staging file is consumed either way: kept (copied into
-            # the snippet store) or refused, it never lingers.
+            # A full-pass recording is far too large to ride the
+            # feed as base64, so it moves by reference and its size
+            # is read from the file. The staging file is consumed
+            # either way: kept (copied into the snippet store) or
+            # refused, it never lingers.
             size = os.path.getsize(src) if os.path.exists(src) else 0
             data = None
         else:
@@ -1354,126 +1333,6 @@ class WatchRunner:
                 data={"transcription": counts}))
             self._tx_queue = None
 
-    # -------------------------------------------------- LRPT decode
-    def _start_lrpt_decode(self):
-        """Bind the bounded LRPT decode queue when SatDump is
-        staged on the host. Absence is a state the satellite desk
-        already states in every LRPT pass event, never an error.
-        Unlike transcription this binds for the simulated source
-        too: the simulated feed's LRPT IQ is a synthetic fixture,
-        and a decode attempt against it files its honest outcome
-        (a synthetic pass cannot yield real imagery, and the
-        imagery event carries the synthetic flag either way)."""
-        from . import lrpt
-        if not lrpt.satdump_available():
-            return
-        self._lrpt_queue = lrpt.DecodeQueue()
-
-        def sink(job, png, info_or_reason):
-            with self._lrpt_lock:
-                self._lrpt_results.append((job, png, info_or_reason))
-
-        self._lrpt_worker = lrpt.DecodeWorker(self._lrpt_queue, sink)
-        self._lrpt_worker.start()
-
-    def _submit_lrpt(self, ev, bill_id):
-        if self._lrpt_queue is None:
-            return
-        if ev["data"].get("lrpt_decode") != "pending":
-            return
-        rel = ev.get("snippet")
-        if not rel:
-            return
-        # The pass's grant stays open until the decode files:
-        # the imagery is part of this pass's reception, charged
-        # against the same grant as the IQ.
-        self._lrpt_pending.add(bill_id)
-        self._lrpt_queue.submit({
-            "iq_path": os.path.join(self.watch_dir, rel),
-            "iq_rate": ev["data"].get("iq_rate"),
-            "sat": ev["data"].get("sat"),
-            "image_name": ev["data"].get("imagery_file"),
-            "synthetic": bool(ev["data"].get("synthetic")),
-            "pass_event": ev["id"],
-            "bill_id": bill_id,
-            "t0": ev["t_start"], "t1": ev["t_end"],
-            "freq_hz": ev.get("freq_hz")})
-
-    def _drain_lrpt(self):
-        if self._lrpt_queue is None:
-            return
-        with self._lrpt_lock:
-            results, self._lrpt_results = self._lrpt_results, []
-        for job, png, info in results:
-            self._lrpt_pending.discard(job["bill_id"])
-            if png is not None:
-                ev = make_event(
-                    self.watch_id, "satellite", "imagery",
-                    job["t0"], job["t1"], freq_hz=job["freq_hz"],
-                    grade="CONFIRMED",
-                    content="LRPT imagery decoded and filed: %s"
-                            % job["image_name"],
-                    data={"downlink": "lrpt", "sat": job["sat"],
-                          "imagery": job["image_name"],
-                          "imagery_file": job["image_name"],
-                          "pass_event": job["pass_event"],
-                          "bill_id": job["bill_id"],
-                          "synthetic": job["synthetic"],
-                          "decode": info})
-                import base64 as _b64
-                ev["data"]["_snippet"] = {
-                    "filename": job["image_name"], "kind": "imagery",
-                    "b64": _b64.b64encode(png).decode()}
-                self._adopt_snippet(ev, "satellite", job["bill_id"])
-                self._file(ev)
-            else:
-                self._file(make_event(
-                    self.watch_id, "satellite", "imagery",
-                    job["t0"], job["t1"], freq_hz=job["freq_hz"],
-                    grade="CONFIRMED",
-                    content="LRPT imagery not decoded: %s; the "
-                            "pass IQ stands as the evidence"
-                            % info,
-                    data={"downlink": "lrpt", "sat": job["sat"],
-                          "imagery": None,
-                          "pass_event": job["pass_event"],
-                          "bill_id": job["bill_id"],
-                          "synthetic": job["synthetic"],
-                          "decode_reason": info}))
-            # The decode has filed, one way or the other: the
-            # pass's reception is complete, and its grant's
-            # unspent remainder releases now.
-            if self.ledger is not None:
-                grant = self.grants.get(job["bill_id"])
-                if grant is not None \
-                        and grant.get("status") == "open":
-                    self.ledger.close(
-                        grant["id"], job["t1"],
-                        "pass ended; its decode has filed")
-
-    def _stop_lrpt_decode(self):
-        if self._lrpt_worker is not None:
-            self._lrpt_worker.stop()
-            self._lrpt_worker = None
-        self._drain_lrpt()
-        if self._lrpt_queue is not None:
-            counts = dict(self._lrpt_queue.counts)
-            counts["pending_at_stand_down"] = self._lrpt_queue.pending()
-            if counts["submitted"]:
-                self._file(make_event(
-                    self.watch_id, "officer", "system",
-                    self.meta["end"], self.meta["end"],
-                    grade="CONFIRMED",
-                    content="LRPT decode accounting: %d submitted, "
-                            "%d decoded, %d failed, %d dropped by "
-                            "queue, %d pending at stand-down"
-                            % (counts["submitted"], counts["decoded"],
-                               counts["failed"],
-                               counts["dropped_queue"],
-                               counts["pending_at_stand_down"]),
-                    data={"lrpt_decode": counts}))
-            self._lrpt_queue = None
-
     def _maybe_interrupt(self, item, new_events, watch_start):
         if item["cls"] not in ("B", "C"):
             return
@@ -1538,7 +1397,6 @@ class WatchRunner:
             end = watch_start + self._elapsed(bill)
         self.meta["end"] = end
         self._stop_transcription()
-        self._stop_lrpt_decode()
         # Stand-down releases every grant this watch still
         # holds: unspent room returns to the standing pool the
         # moment the watch ends, however it ends, and the filed

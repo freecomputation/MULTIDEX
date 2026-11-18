@@ -1,38 +1,35 @@
-"""0.4.1: LRPT imagery and reception containment.
+"""0.4.1: reception containment, carried through 0.6.0.
 
-The two halves of the build, each pinned where it can be proven
-without hardware. LRPT: a locked METEOR pass files raw IQ and
-states its decode state honestly - pending when SatDump is
-staged, not decoded (with the reason) when it is not - and the
-bounded post-pass decode files its outcome as an imagery event
-beside the pass record, which stands either way. Containment:
-every planned reception carries an allocation computed from its
-own arithmetic, grants against the home's standing pool shrink
-in a stated order when the bill cannot fit it, consumption is
-accounted live against the grants, and a capture truncates at
-its grant.
+The containment half of the 0.4.1 build, pinned where it can be
+proven without hardware: every planned reception carries an
+allocation computed from its own arithmetic, grants against
+the home's standing pool shrink in a stated order when the
+bill cannot fit it, consumption is accounted live against the
+grants, and a capture truncates at its grant.
+
+The build's other half - LRPT imagery, a locked METEOR pass
+filing raw IQ for a bound post-pass decode - retired in
+0.6.0 under the METEOR acknowledgement policy: METEOR passes
+are acknowledged only, carry a zero-byte allocation, and take
+no reservation or grant. The policy's tests live in
+tests/test_fixes_060.py; what remains here of the satellite
+arithmetic is the APT reservation and the acknowledgement's
+zero.
 """
 
 import base64
 import os
-import struct
-import time
-import zlib
 
-import pytest
-
-from multidex import budget, desks, gates, lrpt, products
+from multidex import budget, gates, products
 from multidex.index import Index
 from multidex.officer import WatchRunner
-from multidex.sim import synthetic_lrpt_iq
-from multidex.tuner import RealSource
 
 from conftest import T0
 
 W = "watch-t"
 
 
-def _pass(sat="METEOR-M2 4", norad="59051", window=600):
+def _pass(sat="NOAA 19", norad="33591", window=600):
     return {"sat": sat, "norad": norad, "aos": T0, "los": T0 + window,
             "t_max": T0 + window // 2, "max_elev_deg": 55.0,
             "aos_az_deg": 90.0, "los_az_deg": 270.0}
@@ -52,87 +49,18 @@ def _dwell_item(bid, cls, dur=600, desks=("airband",)):
             "desks": list(desks), "pass": None}
 
 
-def _png_bytes(w=64, h=64):
-    """A real, decodable PNG of deterministic noise."""
-    rng = __import__("random").Random(7)
-    raw = b""
-    for _y in range(h):
-        raw += b"\x00" + bytes(rng.randrange(256) for _x in range(w))
-
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data)) + tag + data
-        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
-
-
-FAKE_SATDUMP = """#!/usr/bin/env python3
-import os, struct, sys, zlib
-argv = sys.argv[1:]
-with open(os.environ["FAKE_SATDUMP_ARGV"], "w") as fh:
-    fh.write("\\n".join(argv))
-out = argv[3]
-mode = os.environ.get("FAKE_SATDUMP_MODE", "ok")
-if mode == "fail":
-    sys.exit(3)
-os.makedirs(os.path.join(out, "MSU-MR"), exist_ok=True)
-png = bytes.fromhex(os.environ["FAKE_PNG_HEX"])
-with open(os.path.join(out, "MSU-MR", "MSU-MR-1.png"), "wb") as fh:
-    fh.write(png)
-sys.exit(0)
-"""
-
-
-@pytest.fixture()
-def fake_satdump(tmp_path, monkeypatch):
-    """A PATH carrying a stand-in satdump that writes a real PNG
-    product (or fails, on FAKE_SATDUMP_MODE=fail) and records its
-    argv. Returns the bin dir."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "satdump"
-    script.write_text(FAKE_SATDUMP)
-    script.chmod(0o755)
-    monkeypatch.setenv("FAKE_SATDUMP_ARGV", str(tmp_path / "argv.txt"))
-    monkeypatch.setenv("FAKE_PNG_HEX", _png_bytes().hex())
-    monkeypatch.setenv(
-        "PATH", str(bin_dir) + os.pathsep + "/usr/bin:/bin")
-    return bin_dir
-
-
-def _lrpt_feed(**kw):
-    iq = synthetic_lrpt_iq(seconds=1)
-    feed = {"lock": True, "quality": 0.8, "sat": "METEOR-M2 4",
-            "norad": "59051",
-            "iq_b64": base64.b64encode(iq).decode("ascii"),
-            "iq_name": "pass-59051-%d.cu8" % int(T0),
-            "iq_rate": budget.LRPT_IQ_RATE, "iq_format": "cu8",
-            "iq_bytes": len(iq), "iq_synthetic": True}
-    feed.update(kw)
-    return feed
-
-
-def _ctx(t0=T0, t1=T0 + 600, **kw):
-    ctx = {"watch_id": W, "desk": "satellite", "t0": t0, "t1": t1,
-           "freq_hz": 137.1e6, "home": (39.0, -98.0),
-           "profile": {}, "pass": _pass()}
-    ctx.update(kw)
-    return ctx
-
-
 # ------------------------------------------------- allocation arithmetic
 
-def test_lrpt_reservation_is_rate_times_window():
-    item = _pass_item("bill-001", "METEOR-M2 4", window=600, dur=900)
+def test_meteor_allocation_is_zero_bytes():
+    # Acknowledged only: the pass is billed (its tuner seconds
+    # stand) and allocates nothing.
+    item = _pass_item("bill-001", "METEOR-M2 4", window=600,
+                      dur=900)
     alloc = budget.item_allocation(item)
-    # The window is the predicted AOS-to-LOS span (600 s), not
-    # the padded bill duration (900 s): 600 s at 1,024,000
-    # samples/s x 2 bytes, plus the image allowance.
-    assert alloc["bytes"] == 600 * 1024000 * 2 \
-        + budget.LRPT_PNG_ALLOWANCE
+    assert alloc["bytes"] == 0
     assert alloc["tuner_s"] == 900
+    assert budget.downlink_kind("METEOR-M2 4") == "acknowledged"
+    assert budget.downlink_kind("METEOR-M 2") == "acknowledged"
 
 
 def test_apt_reservation_is_stored_rate_times_window():
@@ -147,7 +75,9 @@ def test_grants_aggregate_classes_and_reserve(profile, home):
     # figure is the pool's open satellite reservation. The
     # windows are short because the pool also reads the home's
     # actual disk state, and the test home sits on a small
-    # scratch filesystem: the bill must fit both.
+    # scratch filesystem: the bill must fit both. The METEOR
+    # item takes no grant under the acknowledgement policy, so
+    # the satellite figure is the APT pass alone.
     profile["watch"]["disk_ceiling_gb"] = 20.0
     bill = [_pass_item("bill-001", "METEOR-M2 4", window=60),
             _pass_item("bill-002", "NOAA 19", window=300),
@@ -157,7 +87,8 @@ def test_grants_aggregate_classes_and_reserve(profile, home):
     grants, statements, pool = budget.request_watch_grants(
         ledger, profile, W, bill, T0)
     assert statements == []
-    sat = bill[0]["allocation"]["bytes"] + bill[1]["allocation"]["bytes"]
+    assert "bill-001" not in grants
+    sat = bill[1]["allocation"]["bytes"]
     assert pool["satellite_reserve_bytes"] == sat
     sl = budget.watch_slice(ledger, W)
     assert sl["by_class"]["A"]["granted"] == sat
@@ -165,11 +96,12 @@ def test_grants_aggregate_classes_and_reserve(profile, home):
     assert sl["by_class"]["B"]["granted"] == \
         bill[2]["allocation"]["bytes"]
     assert sl["granted_bytes"] == \
-        sum(i["allocation"]["bytes"] for i in bill)
+        bill[1]["allocation"]["bytes"] \
+        + bill[2]["allocation"]["bytes"]
     assert pool["free_bytes"] == pool["cap_bytes"] \
         - pool["margin_bytes"] - sl["granted_bytes"]
-    assert grants["bill-001"]["bytes"] == \
-        bill[0]["allocation"]["bytes"]
+    assert grants["bill-002"]["bytes"] == \
+        bill[1]["allocation"]["bytes"]
     assert "bill-999" not in grants
 
 
@@ -214,7 +146,7 @@ def test_degradation_floors_c_then_b_and_holds_satellite(profile,
 def test_degradation_reaches_satellite_last_and_says_so(profile,
                                                         home):
     profile["watch"]["disk_ceiling_gb"] = 0.0005  # 500 KB cap
-    bill = [_pass_item("bill-001", "METEOR-M2 4"),
+    bill = [_pass_item("bill-001", "NOAA 19"),
             _dwell_item("bill-002", "C", dur=600)]
     budget.annotate_bill(bill)
     ledger = budget.AllocationLedger.load(home)
@@ -229,93 +161,7 @@ def test_degradation_reaches_satellite_last_and_says_so(profile,
     assert grants["bill-001"]["bytes"] == budget.FLOOR_BYTES
 
 
-# ------------------------------------------------- LRPT desk honesty
-
-def test_lrpt_event_pending_with_satdump_staged(profile, fake_satdump):
-    events = desks.process_satellite(_lrpt_feed(), _ctx())
-    ev = events[0]
-    assert ev["data"]["downlink"] == "lrpt"
-    assert ev["data"]["lrpt_decode"] == "pending"
-    assert ev["data"]["imagery"] is None
-    assert ev["data"]["imagery_file"].endswith(".png")
-    assert "decode follows the pass" in ev["content"]
-    assert ev["data"]["synthetic"] is True
-    assert ev["data"]["_snippet"]["filename"].endswith(".cu8")
-
-
-def test_lrpt_event_without_iq_states_it(profile):
-    feed = _lrpt_feed()
-    del feed["iq_b64"]
-    events = desks.process_satellite(feed, _ctx())
-    ev = events[0]
-    assert ev["data"]["imagery"] is None
-    assert "the feed carried no pass IQ" in ev["content"]
-    assert "_snippet" not in ev["data"]
-
-
-def test_sim_meteor_feed_is_iq_and_labelled(profile):
-    from multidex.sim import SimSource
-    src = SimSource(profile, T0)
-    vfo = {"desk": "satellite", "freq_hz": 137.1e6,
-           "pass": {"sat": "METEOR-M2 4", "norad": "59051",
-                    "aos": T0, "los": T0 + 600, "max_elev_deg": 55.0}}
-    feed = src._satellite_feed(vfo)
-    assert feed["lock"] is True
-    assert "audio_b64" not in feed
-    assert feed["iq_synthetic"] is True
-    assert feed["iq_rate"] == budget.LRPT_IQ_RATE
-    raw = base64.b64decode(feed["iq_b64"])
-    assert len(raw) == feed["iq_bytes"] > 0
-
-
-# ------------------------------------------------- the SatDump binding
-
-def test_pipeline_selection_by_generation():
-    assert lrpt.pipeline_for("METEOR-M2 4") == \
-        ("meteor_m2-x_lrpt", "M2-4")
-    assert lrpt.pipeline_for("METEOR-M2 3") == \
-        ("meteor_m2-x_lrpt", "M2-3")
-    assert lrpt.pipeline_for("METEOR-M2") == ("meteor_m2_lrpt", "M2")
-    assert lrpt.pipeline_for("METEOR-M2 2") == \
-        ("meteor_m2_lrpt", "M2-2")
-
-
-def test_decode_iq_with_fake_satdump(tmp_path, fake_satdump):
-    iq_path = tmp_path / "pass.cu8"
-    iq_path.write_bytes(synthetic_lrpt_iq(seconds=1))
-    png, info = lrpt.decode_iq(str(iq_path), budget.LRPT_IQ_RATE,
-                               "METEOR-M2 4")
-    assert png is not None and png.startswith(b"\x89PNG")
-    assert info["pipeline"] == "meteor_m2-x_lrpt"
-    assert info["satellite_number"] == "M2-4"
-    argv = (tmp_path / "argv.txt").read_text().splitlines()
-    assert argv[0] == "meteor_m2-x_lrpt"
-    assert argv[1] == "baseband"
-    assert "--baseband_format" in argv and "cu8" in argv
-    assert "--satellite_number" in argv and "M2-4" in argv
-    assert "--dc_block" in argv
-
-
-def test_decode_iq_failure_is_an_honest_reason(tmp_path, fake_satdump,
-                                               monkeypatch):
-    monkeypatch.setenv("FAKE_SATDUMP_MODE", "fail")
-    iq_path = tmp_path / "pass.cu8"
-    iq_path.write_bytes(b"\x00" * 64)
-    png, reason = lrpt.decode_iq(str(iq_path), budget.LRPT_IQ_RATE,
-                                 "METEOR-M2 4")
-    assert png is None
-    assert "exited 3" in reason and "no image" in reason
-
-
-def test_decode_iq_without_satdump(tmp_path, monkeypatch):
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    png, reason = lrpt.decode_iq(str(tmp_path / "x.cu8"),
-                                 budget.LRPT_IQ_RATE, "METEOR-M2 4")
-    assert png is None
-    assert "not staged" in reason
-
-
-# ------------------------------------------------- officer decode drain
+# --------------------------------------- live accounting and refusal
 
 def _runner(home, profile, index):
     runner = WatchRunner(home, profile, index)
@@ -324,80 +170,6 @@ def _runner(home, profile, index):
     os.makedirs(runner.watch_dir, exist_ok=True)
     return runner
 
-
-def _submit_pass_job(runner, tmp_path):
-    iq_path = tmp_path / "filed.cu8"
-    iq_path.write_bytes(synthetic_lrpt_iq(seconds=1))
-    rel_dir = os.path.join(runner.watch_dir, "snippets")
-    os.makedirs(rel_dir, exist_ok=True)
-    filed = os.path.join(rel_dir, "pass.cu8")
-    iq_path.replace(filed)
-    runner._lrpt_queue.submit({
-        "iq_path": filed, "iq_rate": budget.LRPT_IQ_RATE,
-        "sat": "METEOR-M2 4", "image_name": "pass-59051-1.png",
-        "synthetic": True, "pass_event": "ev-pass",
-        "bill_id": "bill-001", "t0": T0, "t1": T0 + 600,
-        "freq_hz": 137.1e6})
-
-
-def _wait_idle(runner, timeout=30):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if runner._lrpt_queue.pending() == 0:
-            return
-        time.sleep(0.05)
-    raise AssertionError("decode queue never drained")
-
-
-def test_officer_files_imagery_event_and_flash(home, profile, index,
-                                               tmp_path, fake_satdump):
-    runner = _runner(home, profile, index)
-    runner._start_lrpt_decode()
-    assert runner._lrpt_queue is not None
-    _submit_pass_job(runner, tmp_path)
-    _wait_idle(runner)
-    runner._drain_lrpt()
-    imagery = index.events(watch_id=W, kinds=["imagery"])
-    assert len(imagery) == 1
-    ev = imagery[0]
-    assert ev["data"]["imagery"] == "pass-59051-1.png"
-    assert ev["data"]["synthetic"] is True
-    assert ev["data"]["pass_event"] == "ev-pass"
-    assert "LRPT imagery decoded and filed" in ev["content"]
-    assert ev["snippet"] and ev["snippet"].endswith(".png")
-    png_path = os.path.join(runner.watch_dir, ev["snippet"])
-    with open(png_path, "rb") as fh:
-        assert fh.read().startswith(b"\x89PNG")
-    flashes = [f for f in os.listdir(runner.watch_dir)
-               if f.startswith("FLASH")]
-    assert len(flashes) == 1
-    text = open(os.path.join(runner.watch_dir, flashes[0])).read()
-    assert "satellite imagery decoded" in text
-    assert "pass-59051-1.png" in text
-    runner._lrpt_worker.stop()
-
-
-def test_officer_decode_failure_keeps_pass_record(home, profile, index,
-                                                  tmp_path, fake_satdump,
-                                                  monkeypatch):
-    monkeypatch.setenv("FAKE_SATDUMP_MODE", "fail")
-    runner = _runner(home, profile, index)
-    runner._start_lrpt_decode()
-    _submit_pass_job(runner, tmp_path)
-    _wait_idle(runner)
-    runner._drain_lrpt()
-    imagery = index.events(watch_id=W, kinds=["imagery"])
-    assert len(imagery) == 1
-    ev = imagery[0]
-    assert ev["data"]["imagery"] is None
-    assert "LRPT imagery not decoded" in ev["content"]
-    assert "exited 3" in ev["content"]
-    assert not [f for f in os.listdir(runner.watch_dir)
-                if f.startswith("FLASH")]
-    runner._lrpt_worker.stop()
-
-
-# --------------------------------------- live accounting and refusal
 
 def test_live_accounting_and_allocation_refusal(home, profile, index):
     runner = _runner(home, profile, index)
@@ -455,50 +227,12 @@ def test_file_payload_moves_by_reference(home, profile, index,
     assert rows[0]["bytes"] == 8192 and rows[0]["shed"] == 0
 
 
-# --------------------------------------- truncation at the allocation
-
-def test_lrpt_capture_truncates_at_byte_cap(monkeypatch):
-    source = RealSource({})
-    source.scan = lambda *a, **k: {
-        "noise_floor_db": -100.0,
-        "emissions": [{"freq_hz": 137.1e6, "peak_dbm": -55.0,
-                       "bw_hz": 40e3, "shape": "unknown",
-                       "label": None}]}
-    calls = []
-
-    def fake_stream(cmd, path, seconds):
-        calls.append(cmd)
-        nsamp = int(cmd[cmd.index("-n") + 1])
-        with open(path, "wb") as fh:
-            fh.write(b"\x80" * nsamp * 2)
-        return nsamp * 2
-
-    monkeypatch.setattr("multidex.tuner._stream_to_file", fake_stream)
-    now = time.time()
-    vfo = {"desk": "satellite", "freq_hz": 137.1e6, "bw_hz": 150e3,
-           "byte_cap": 4000000,
-           "pass": {"sat": "METEOR-M2 4", "norad": "59051",
-                    "aos": now - 60, "los": now + 540}}
-    feed = source._feed_satellite([vfo], 137.1e6, 2.4e6,
-                                  now - 60, now + 660)
-    try:
-        assert feed["lock"] is True
-        assert feed["iq_truncated"] is True
-        assert feed["iq_bytes"] == 4000000
-        cmd = calls[0]
-        # The capture asked rtl_sdr for exactly cap / 2 samples.
-        assert int(cmd[cmd.index("-n") + 1]) == 2000000
-        assert feed["iq_rate"] == budget.LRPT_IQ_RATE
-    finally:
-        if feed.get("iq_file"):
-            os.remove(feed["iq_file"])
-
-
 # ------------------------------------------------- doctor and products
 
-def test_doctor_reports_satdump_and_budget(profile, home):
+def test_doctor_reports_satellite_policy_and_budget(profile, home):
     text = gates.doctor_text(profile, home)
-    assert "satellite LRPT" in text
+    assert "acknowledged only" in text
+    assert "satdump" not in text
     assert "Reception pool for this home" in text
 
 
@@ -523,18 +257,26 @@ def test_report_reception_account_and_live_state(home, profile):
     assert meta["reception_grants"]["granted_bytes"] > 0
     # budget.json is a snapshot view of the ledger at muster:
     # it carries the pool figures and one grant per bill item.
+    # A billed METEOR pass holds no grant under the
+    # acknowledgement policy, so the snapshot's grants are the
+    # bill's items minus its acknowledged passes.
     snap = util.read_json(os.path.join(wdir, "budget.json"))
     assert snap["pool"]["cap_bytes"] == 50000000
     bill = util.read_json(os.path.join(wdir, "bill.json"))
+    acknowledged = {i["id"] for i in bill
+                    if budget.downlink_kind(
+                        (i.get("pass") or {}).get("sat"))
+                    == "acknowledged"}
     assert {g["bill_id"] for g in snap["grants"]} == \
-        {i["id"] for i in bill}
+        {i["id"] for i in bill} - acknowledged
     state = util.read_json(os.path.join(wdir, "state.json"))
     assert state["budget"]["cap_bytes"] == 50000000
     assert state["budget"]["watch_granted_bytes"] > 0
     # The standing satellite reservations exist independently
     # of this watch's bill (the bill held no passes at all):
     # they were taken at muster for the windows ahead and are
-    # still standing in the pool after stand-down.
+    # still standing in the pool after stand-down. They are
+    # APT reservations only under the acknowledgement policy.
     assert state["budget"]["satellite_reserve_bytes"] > 0
     report = open(os.path.join(wdir, "REPORT.md")).read()
     assert "Reception account" in report

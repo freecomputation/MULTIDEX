@@ -3,8 +3,7 @@
 MULTIDEX is a standard-library build. A small number of desks
 decode through a proven external program when the host carries
 one - the WSJT-X jt9 decoder for FT8, dumpvdl2 for VDL2, DSD-FME
-for digital-voice signalling, SatDump for METEOR LRPT imagery.
-The binding is arms-length: the
+for digital-voice signalling. The binding is arms-length: the
 program is invoked as a separate process over files, never
 linked, never bundled. When the program is absent the desk
 benches with the staging instruction as its reason, stated on
@@ -17,7 +16,12 @@ the doctor prints it, and the test suite asserts it names
 every program the package source invokes, so a binding cannot
 be added quietly. An entry leaves the census only when an own
 implementation retires it - as the package's own APT decoder
-(multidex.apt) retired the aptdec binding in 0.5.0.
+(multidex.apt) retired the aptdec binding in 0.5.0 - or when
+the function it served is retired, as the METEOR
+acknowledgement policy retired the satellite imagery decoder
+binding in 0.6.0: METEOR passes are acknowledged only and
+nothing is decoded for them, so no decoder is bound for them
+at all.
 """
 
 import shutil
@@ -94,9 +98,6 @@ DEPENDENCES = (
      "the digital voice desk"),
     ("dumphfdl", "dumphfdl", "path",
      "the HFDL desk"),
-    ("satdump", "satdump", "path",
-     "the satellite desk - LRPT imagery decode after a "
-     "METEOR pass"),
     ("faster-whisper", "faster_whisper", "module",
      "transcription - the host faster-whisper stack"),
     ("chronyc", "chronyc", "path",

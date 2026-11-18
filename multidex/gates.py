@@ -181,15 +181,12 @@ def doctor_text(profile, home):
                      "on this host; the amateur desk still stands "
                      "for CW, and SSB voice on its windows is the "
                      "audio census desk's catch")
-    if _ta("satdump"):
-        lines.append("- satellite LRPT: bound - the host satdump "
-                     "program decodes recorded METEOR IQ into "
-                     "imagery after each pass")
-    else:
-        lines.append("- satellite LRPT: satdump is not staged on "
-                     "this host; METEOR passes still record and "
-                     "file their IQ, and their events state that "
-                     "LRPT imagery was not decoded")
+    lines.append("- satellite: NOAA APT passes are recorded "
+                 "whole and decoded by the package's own APT "
+                 "decoder; METEOR passes are acknowledged only "
+                 "under the acknowledgement policy - not "
+                 "recorded, carrying a zero-byte allocation, "
+                 "and holding no reservation or grant")
     # The dependence census: every external program this build
     # invokes, printed from the binding table itself so the
     # account cannot drift from the code. Each entry is a
@@ -215,6 +212,8 @@ def doctor_text(profile, home):
         import time as _time
         from . import budget as _budget_mod
         _ledger = _budget_mod.AllocationLedger.load(home)
+        for _statement in _ledger.load_statements:
+            lines.append("Reception pool: %s" % _statement)
         _sats, _path = load_sats(profile)
         _created, _expired = _budget_mod.refresh_reserves(
             _ledger, profile, _sats, _time.time())

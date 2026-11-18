@@ -14,6 +14,14 @@ import sqlite3
 
 from . import events as evmod
 
+# The payload snippet class: payload evidence (the digital
+# voice desk's vocoder frame archives) is permanent Tier-0
+# evidence. Payload rows are never selected as shed victims,
+# and a payload snippet is filed even when nothing sheddable
+# remains under the ceiling - the ceiling yields to it, and
+# the reception account states its bytes and the exemption.
+PAYLOAD_KIND = "payload"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events(
   id TEXT PRIMARY KEY, watch_id TEXT, desk TEXT, kind TEXT,
@@ -393,13 +401,16 @@ class Index:
         """Write a snippet under quota and ceiling. Returns (path, shed).
 
         The payload is either bytes (`data`) or a file to copy in
-        (`source_path`, for captures too large to hold in memory -
-        an LRPT pass recording is hundreds of megabytes); the
-        accounting is identical either way, from the byte size.
+        (`source_path`, for captures too large to hold in memory);
+        the accounting is identical either way, from the byte size.
 
         Sheds oldest snippets (satellite imagery last) when the
         ceiling demands it; every shed is reported so the officer
-        can file it as an event. With home_wide the ceiling is the
+        can file it as an event. Payload-class snippets are the
+        one exemption: they are never shed, and a payload snippet
+        is filed even when nothing sheddable remains - the
+        ceiling yields to payload evidence, whose true size the
+        reception account states. With home_wide the ceiling is the
         home's standing cap and the shed candidates are the oldest
         filed receptions across the whole home, not only the
         filing watch's - the ceiling is a property of the
@@ -439,15 +450,22 @@ class Index:
             if home_wide:
                 victim = self.db.execute(
                     "SELECT * FROM snippets WHERE shed=0 "
+                    "AND kind<>? "
                     "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
-                    ()).fetchone()
+                    (PAYLOAD_KIND,)).fetchone()
             else:
                 victim = self.db.execute(
                     "SELECT * FROM snippets WHERE watch_id=? "
-                    "AND shed=0 "
+                    "AND shed=0 AND kind<>? "
                     "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
-                    (watch_id,)).fetchone()
+                    (watch_id, PAYLOAD_KIND)).fetchone()
             if victim is None:
+                if kind == PAYLOAD_KIND:
+                    # Nothing sheddable remains and the ceiling
+                    # still does not fit it: payload evidence is
+                    # filed anyway. Frames not kept are lost;
+                    # the overage stands in the accounting.
+                    break
                 self.db.commit()
                 self._record_snippet_refusal(
                     watch_id, desk, kind, filename, size,
@@ -520,8 +538,14 @@ class Index:
         shed = self.db.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS b FROM "
             "snippets WHERE watch_id=? AND shed=1", (watch_id,)).fetchone()
+        payload = self.db.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS b FROM "
+            "snippets WHERE watch_id=? AND shed=0 AND kind=?",
+            (watch_id, PAYLOAD_KIND)).fetchone()
         return {"kept_count": kept["n"], "kept_bytes": kept["b"],
-                "shed_count": shed["n"], "shed_bytes": shed["b"]}
+                "shed_count": shed["n"], "shed_bytes": shed["b"],
+                "payload_count": payload["n"],
+                "payload_bytes": payload["b"]}
 
     # --------------------------------------------------------- watch meta
     def set_watch_meta(self, watch_id, meta):

@@ -12,10 +12,11 @@ that binding for the package's own APT decoder (multidex.apt),
 and the content-level ground truth for the decoder lives in
 tests/test_fixes_050.py. METEOR-M2 4 flies LRPT, a digital
 downlink the APT decoder does not address; through 0.4.0 its
-passes said imagery was not applicable. The 0.4.1 contract
-supersedes that: an LRPT pass files raw IQ and states its
-decode state - see tests/test_fixes_041.py, which carries the
-LRPT tests now.
+passes said imagery was not applicable, and 0.4.1 recorded the
+pass as raw IQ for a bound post-pass decoder. The 0.6.0
+acknowledgement policy supersedes both: a METEOR pass is
+acknowledged only, and the test below pins that contract -
+see tests/test_fixes_060.py for the full policy suite.
 """
 
 import array
@@ -150,32 +151,30 @@ def test_undecodable_audio_is_stated_not_silent(profile):
     assert snippet["filename"].endswith(".wav")
 
 
-def test_meteor_lrpt_files_iq_not_audio(profile, monkeypatch,
-                                        tmp_path):
-    # The 0.4.1 contract: a locked METEOR pass files raw IQ,
-    # never audio, and the APT path never runs for it. With no
-    # satdump on PATH the pass states its imagery was not decoded.
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    from multidex.sim import synthetic_lrpt_iq
-    iq = synthetic_lrpt_iq(seconds=1)
+def test_meteor_pass_is_acknowledged_not_recorded(profile):
+    # The 0.6.0 contract: a METEOR pass is acknowledged only.
+    # Even a feed in the retired shape - a lock with IQ
+    # attached, as the 0.4.1 sources produced - files the
+    # acknowledgement and nothing else: no snippet, no decode
+    # state, no imagery claim.
     feed = {"lock": True, "quality": 0.8, "sat": "METEOR-M2 4",
             "norad": "59051",
-            "iq_b64": base64.b64encode(iq).decode("ascii"),
+            "iq_b64": base64.b64encode(b"\x00" * 2048).decode(),
             "iq_name": "pass-59051-%d.cu8" % int(T0),
             "iq_rate": 1024000, "iq_format": "cu8",
-            "iq_bytes": len(iq), "iq_synthetic": True}
+            "iq_bytes": 2048, "iq_synthetic": True}
     events = desks.process_satellite(
         feed, _ctx(profile, "satellite", **{"pass": _pass()}))
     ev = events[0]
-    assert ev["grade"] == "CONFIRMED"
-    assert ev["data"]["downlink"] == "lrpt"
-    assert ev["data"]["imagery"] is None
-    assert ev["data"]["lrpt_decode"] == "not staged"
-    assert "satdump is not staged" in ev["content"]
-    assert ev["data"]["synthetic"] is True
-    snippet = ev["data"]["_snippet"]
-    assert isinstance(snippet, dict)
-    assert snippet["filename"].endswith(".cu8")
+    assert ev["kind"] == "pass" and ev["grade"] == "CONFIRMED"
+    assert ev["emitter"] == "METEOR-M2 4"
+    assert "pass acknowledged, not recorded" in ev["content"]
+    assert ev["data"]["acknowledged"] is True
+    assert ev["data"]["recorded"] is False
+    assert ev["data"]["allocation_bytes"] == 0
+    assert "_snippet" not in ev["data"]
+    assert "downlink" not in ev["data"]
+    assert "imagery" not in ev["data"]
 
 
 # --------------------------------------------- the recorder (real)

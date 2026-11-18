@@ -143,11 +143,15 @@ def test_census_names_the_standing_debts():
     programs = {row["program"] for row in toolbind.dependence_census()}
     for name in ("rtl_sdr", "rtl_fm", "rtl_433", "multimon-ng",
                  "jt9", "dumpvdl2", "dsd-fme", "dumphfdl",
-                 "satdump", "faster-whisper", "chronyc"):
+                 "faster-whisper", "chronyc"):
         assert name in programs
-    # The retired APT binding is gone from the census, not
-    # carried as a present-tense entry.
+    # The retired bindings are gone from the census, not
+    # carried as present-tense entries: the APT binding retired
+    # by the own decoder in 0.5.0, and the satellite imagery
+    # decoder binding retired by the METEOR acknowledgement
+    # policy in 0.6.0.
     assert "aptdec" not in programs
+    assert "satdump" not in programs
 
 
 def test_census_presence_agrees_with_the_probes():

@@ -25,11 +25,16 @@ multimon-ng - and feeds the standing desks from real captures:
   maximum gain and filed as evidence, and the satellite desk
   decodes APT imagery from that recording with the package's
   own decoder (multidex.apt).
-  A METEOR pass is a digital LRPT downlink, not audio: on a lock
-  the pass is recorded as raw IQ at the LRPT rate, bounded by
-  the reception allocation the officer put on the vfo, and the
-  desk's imagery step decodes it with SatDump after the pass
-  when that program is staged.
+  A METEOR pass is acknowledged only (0.6.0): the feed carries
+  the pass identity and the desk files the acknowledgement -
+  no scan is run for it and no capture of any kind is attempted,
+  no audio and no IQ;
+- digital voice is fed by the bound DSD-FME program's log for
+  call signalling, and by the vocoder parameter frames the
+  same program writes to its mbe data directory (its -d
+  option): the de-interleaved AMBE+2 or IMBE parameter frames,
+  harvested after the run and carried to the desk as payload
+  evidence (see _harvest_mbe_frames).
 
 Desks that need a decoder program outside that tool set bench with
 the reason stated (multidex.desks). A capture failure on one desk is
@@ -241,21 +246,98 @@ def _run_dumpvdl2(source, t0, t1):
     return msgs
 
 
-def _run_dsd_fme(center_hz, seconds):
-    """Run DSD-FME against the RTL-SDR for a bounded slice and
-    parse its log for call metadata. The program's own output
-    vocabulary varies by build; the parser is deliberately
-    narrow (protocol + talkgroup lines) and anything it cannot
-    read is not reported. Field note: the program's rtl path
-    reports a center frequency 252 kHz above the requested
-    channel, which reads as its internal offset tuning (its
-    demod output is at 12 kHz); the invocation is unchanged
-    for it."""
-    calls = []
+# The mbe data containers DSD-FME writes (its -d option):
+# extension -> (frame format, container bytes per 20 ms frame,
+# vocoder parameter bits per frame). A file is the 4-byte
+# cookie that repeats its extension, then one record per
+# frame: an error-count byte followed by the parameter bits
+# packed - 49 AMBE+2 bits in 7 bytes, 88 IMBE bits in 11
+# bytes. The records hold the de-interleaved parameter frames
+# themselves: in the program's own processing path the same
+# demodulated, error-corrected parameter array is handed both
+# to its synthesizer and to the file writer.
+_MBE_FORMATS = {
+    ".amb": ("AMBE+2", 8, 49),
+    ".imb": ("IMBE", 12, 88),
+}
+
+
+def _harvest_mbe_frames(directory):
+    """Read the mbe data files in a directory into frame
+    archive records for the digital voice desk. A file whose
+    cookie does not match its extension, or that holds no
+    whole frame, is not an archive and is skipped. The slot is
+    read from the file name's _S1/_S2 suffix, the program's
+    own per-slot naming."""
+    out = []
+    if not directory:
+        return out
     try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return out
+    for name in names:
+        ext = os.path.splitext(name)[1].lower()
+        spec = _MBE_FORMATS.get(ext)
+        if spec is None:
+            continue
+        try:
+            with open(os.path.join(directory, name), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        fmt, frame_bytes, param_bits = spec
+        if len(raw) <= 4 or raw[:4] != ext.encode("ascii"):
+            continue
+        frames = (len(raw) - 4) // frame_bytes
+        if frames <= 0:
+            continue
+        slot = None
+        m = re.search(r"_S([12])$", os.path.splitext(name)[0])
+        if m:
+            slot = int(m.group(1))
+        out.append({
+            "format": fmt, "container": ext,
+            "frame_bytes": frame_bytes, "param_bits": param_bits,
+            "frames": frames, "bytes": len(raw), "slot": slot,
+            "source_name": name,
+            "b64": base64.b64encode(raw).decode("ascii")})
+    return out
+
+
+def _run_dsd_fme(center_hz, seconds):
+    """Run DSD-FME against the RTL-SDR for a bounded slice,
+    parse its log for call metadata, and harvest the vocoder
+    parameter frames it writes to its mbe data directory (the
+    invocation passes -d with a per-run directory). Returns
+    the digital voice feed: the calls, each carrying the frame
+    archives associated with it, plus any archives no call
+    could be associated with.
+
+    The program's own output vocabulary varies by build; the
+    parser is deliberately narrow (protocol + talkgroup lines)
+    and anything it cannot read is not reported. Field note:
+    the program's rtl path reports a center frequency 252 kHz
+    above the requested channel, which reads as its internal
+    offset tuning (its demod output is at 12 kHz); the
+    invocation is unchanged for it.
+
+    Frame association is by the program's own per-slot files:
+    an archive from the slot-1 file belongs to a call the log
+    places on slot 1. When the capture holds exactly one call,
+    its archives attach to it whatever their slot. Anything
+    else is returned unassociated, and the desk archives it
+    under the capture window's provenance rather than guessing
+    a call. The program writes frames only for calls it can
+    hear in the clear (or with a keystream), so encrypted
+    calls produce no archives."""
+    calls = []
+    mbe_dir = None
+    try:
+        mbe_dir = tempfile.mkdtemp(prefix="multidex-mbe-")
         proc = subprocess.Popen(
             ["dsd-fme", "-i", "rtl:0:%d:23" % int(center_hz),
-             "-o", "null"],
+             "-o", "null", "-d", mbe_dir],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             raw, _ = proc.communicate(timeout=seconds)
@@ -264,7 +346,9 @@ def _run_dsd_fme(center_hz, seconds):
             raw, _ = proc.communicate()
         text = raw.decode("utf-8", "replace")
     except Exception:
-        return calls
+        if mbe_dir:
+            shutil.rmtree(mbe_dir, ignore_errors=True)
+        return {"calls": calls, "frame_archives": []}
     seen = set()
     for line in text.splitlines():
         for proto, pat in _DSD_PATTERNS:
@@ -284,7 +368,26 @@ def _run_dsd_fme(center_hz, seconds):
                 "slot": int(slot.group(1)) if slot else None,
                 "encrypted": "encrypt" in line.lower(),
                 "freq_hz": center_hz})
-    return calls
+    archives = _harvest_mbe_frames(mbe_dir)
+    if mbe_dir:
+        shutil.rmtree(mbe_dir, ignore_errors=True)
+    unassociated = []
+    for arc in archives:
+        attached = False
+        if arc.get("slot") is not None:
+            for call in calls:
+                if call.get("slot") == arc["slot"]:
+                    arc["association"] = "slot"
+                    call.setdefault("frames", []).append(arc)
+                    attached = True
+                    break
+        if not attached and len(calls) == 1:
+            arc["association"] = "sole call in the capture window"
+            calls[0].setdefault("frames", []).append(arc)
+            attached = True
+        if not attached:
+            unassociated.append(arc)
+    return {"calls": calls, "frame_archives": unassociated}
 
 
 def _dumphfdl_systable_path():
@@ -656,10 +759,8 @@ class RealSource:
                 "absent (its desks file the loss per dwell)")
         detail += "; APT imagery is decoded by the package's " \
                   "own decoder (no external program)"
-        detail += "; satdump %s" % (
-            "present" if shutil.which("satdump") else
-            "absent (METEOR passes file their IQ; LRPT imagery is "
-            "reported not decoded)")
+        detail += "; METEOR passes are acknowledged only and " \
+                  "are not recorded"
         return True, detail
 
     def capabilities(self):
@@ -730,30 +831,6 @@ class RealSource:
                 os.remove(path)
             except OSError:
                 pass
-
-    def _iq_to_file(self, center_hz, rate, nsamp, seconds=40,
-                    gain="23"):
-        """Stream an IQ capture to a file the caller keeps.
-
-        The LRPT pass recording is far too large to ride the feed
-        as bytes; it is staged in a file and the feed carries the
-        path. Returns (path, bytes_written). Ownership of the
-        file passes to the caller. Raises TunerLost when the
-        capture produced nothing at all.
-        """
-        with tempfile.NamedTemporaryFile(suffix=".cu8",
-                                         delete=False) as fh:
-            path = fh.name
-        size = _stream_to_file(
-            ["rtl_sdr", "-f", str(int(center_hz)), "-s", str(rate),
-             "-n", str(nsamp), "-g", gain, path], path, seconds)
-        if size == 0:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            raise TunerLost("rtl_sdr produced no samples")
-        return path, size
 
     # --------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -1085,13 +1162,15 @@ class RealSource:
                 "bursts": [{"count": bursts}] if bursts else []}
 
     def _feed_digitalvoice(self, vfos, center_hz, bw_hz, t0, t1):
-        """Digital voice metadata via the bound DSD-FME program's
-        own log. Voice is never decoded (see the desk)."""
+        """Digital voice via the bound DSD-FME program: call
+        signalling from its log, and the vocoder parameter
+        frames from its mbe data files. Voice is never decoded
+        (see the desk)."""
         from .toolbind import tool_available
         if not tool_available("dsd-fme"):
-            return {"calls": []}
-        return {"calls": _run_dsd_fme(center_hz,
-                                      min(60.0, max(10.0, t1 - t0)))}
+            return {"calls": [], "frame_archives": []}
+        return _run_dsd_fme(center_hz,
+                            min(60.0, max(10.0, t1 - t0)))
 
     def _feed_hfdl(self, vfos, center_hz, bw_hz, t0, t1):
         """HFDL via the bound dumphfdl program, which drives the
@@ -1265,6 +1344,13 @@ class RealSource:
     def _feed_satellite(self, vfos, center_hz, bw_hz, t0, t1):
         vfo = vfos[0]
         p = vfo.get("pass") or {}
+        if "METEOR" in (p.get("sat") or "").upper():
+            # Acknowledged only (0.6.0): no scan is run and no
+            # capture is attempted for a METEOR pass. The feed
+            # carries the pass identity alone, and the desk
+            # files the acknowledgement from it.
+            return {"sat": p.get("sat"), "norad": p.get("norad"),
+                    "acknowledged": True}
         scan = self.scan(center_hz, bw_hz, t0, t1)
         floor = scan["noise_floor_db"]
         best = None
@@ -1277,8 +1363,6 @@ class RealSource:
         feed = {"lock": lock,
                 "quality": round(min(1.0, max(0.0, (best or 0.0) / 30.0)), 2),
                 "sat": p.get("sat"), "norad": p.get("norad")}
-        if lock and (p.get("sat") or "").upper().find("METEOR") >= 0:
-            return self._record_lrpt(feed, vfo, p, t0, t1)
         if lock:
             # Record the whole remaining pass at maximum gain. APT
             # imagery decodes from a continuous full-pass capture;
@@ -1302,46 +1386,6 @@ class RealSource:
             feed["audio_name"] = "pass-%s-%d.wav" % (p.get("norad"),
                                                      int(t0))
             feed["audio_rate"] = 11025
-        return feed
-
-    def _record_lrpt(self, feed, vfo, p, t0, t1):
-        """Record a locked METEOR pass as raw IQ for LRPT decode.
-
-        LRPT is a digital QPSK downlink; there is no audio to
-        demodulate, and an FM recording of it can never be decoded
-        after the fact, so the evidence is the baseband itself.
-        The recording runs at the LRPT rate (multidex.budget) for
-        the whole remaining pass at maximum gain, as the APT
-        recording does - and it is the first citizen of the
-        reception allocation: the officer puts the item's byte
-        cap on the vfo, and the capture stops cleanly at the cap
-        with the truncation carried in the feed, never discovered
-        at the disk ceiling mid-pass.
-        """
-        from .budget import LRPT_BYTES_PER_SAMPLE, LRPT_IQ_RATE
-        end = min(t1, p.get("los") or t1)
-        now = time.time()
-        start = now if t0 <= now <= end else t0
-        seconds = max(0.0, end - start)
-        want = int(seconds * LRPT_IQ_RATE)
-        truncated = False
-        cap = vfo.get("byte_cap")
-        if cap is not None:
-            max_samples = int(cap) // LRPT_BYTES_PER_SAMPLE
-            if want > max_samples:
-                want = max_samples
-                truncated = True
-        path, size = self._iq_to_file(vfo["freq_hz"], LRPT_IQ_RATE,
-                                      want, seconds=seconds + 30,
-                                      gain="49.6")
-        feed["iq_file"] = path
-        feed["iq_name"] = "pass-%s-%d.cu8" % (p.get("norad"), int(t0))
-        feed["iq_rate"] = LRPT_IQ_RATE
-        feed["iq_format"] = "cu8"
-        feed["iq_bytes"] = size
-        feed["iq_truncated"] = truncated
-        feed["iq_seconds"] = round(
-            size / float(LRPT_BYTES_PER_SAMPLE * LRPT_IQ_RATE), 1)
         return feed
 
     def _feed_sonde(self, vfos, center_hz, bw_hz, t0, t1):
