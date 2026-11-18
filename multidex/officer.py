@@ -902,6 +902,18 @@ class WatchRunner:
         payload = ev["data"].pop("_snippet", None)
         if payload is None:
             return
+        # A desk may file several payloads with one event (a
+        # satellite pass files its audio and, when the imagery
+        # step decoded it, its image). Payloads are filed in
+        # order under the same ceiling accounting, and the
+        # event's snippet names the last one filed - the
+        # headline product.
+        if isinstance(payload, dict):
+            payload = [payload]
+        for one in payload:
+            self._file_snippet(ev, desk, bill_id, one)
+
+    def _file_snippet(self, ev, desk, bill_id, payload):
         import base64 as _b64
         data = _b64.b64decode(payload["b64"])
         cap = None

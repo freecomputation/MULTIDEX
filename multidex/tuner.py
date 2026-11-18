@@ -21,7 +21,9 @@ multimon-ng - and feeds the standing desks from real captures:
 - pager and APRS are fed from rtl_fm audio decoded by multimon-ng;
 - ISM is fed by rtl_433 run over a captured I/Q file;
 - satellite passes are fed by a measured signal lock on the pass
-  frequency, with the pass audio filed as evidence.
+  frequency; on a lock the whole remaining pass is recorded at
+  maximum gain and filed as evidence, and the satellite desk
+  decodes APT imagery from that recording when aptdec is staged.
 
 Desks that need a decoder program outside that tool set bench with
 the reason stated (multidex.desks). A capture failure on one desk is
@@ -36,6 +38,7 @@ Configured tuner outages (a rehearsal knob) are enforced here, so the
 failure behavior of section 13 is exercised the same way on any source.
 """
 
+import array
 import base64
 import io
 import json
@@ -46,6 +49,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import wave
 
 from . import codecs, modes
@@ -581,6 +585,34 @@ def _write_wav(path, samples, rate):
         w.writeframes(struct.pack("<%dh" % len(samples), *samples))
 
 
+def _resample_int16(samples, src_rate, dst_rate):
+    """Linear-interpolating resample of int16 samples.
+
+    Satellite pass audio is stored at 11025 Hz, the rate APT
+    tooling expects: a full pass stored at the 48 kHz capture rate
+    is over four times the bytes for no more signal, because the
+    APT subcarrier sits at 2400 Hz, far under the stored rate's
+    Nyquist limit. Works on an array('h') so a ten-minute pass
+    never materializes as a list of Python ints.
+    """
+    if src_rate == dst_rate or not samples:
+        return array.array("h", samples)
+    n_out = int(len(samples) * dst_rate // src_rate)
+    out = array.array("h", bytes(2 * n_out))
+    step = src_rate / dst_rate
+    last = len(samples) - 1
+    for i in range(n_out):
+        pos = i * step
+        j = int(pos)
+        if j >= last:
+            out[i] = samples[last]
+        else:
+            frac = pos - j
+            out[i] = int(samples[j] * (1.0 - frac)
+                         + samples[j + 1] * frac)
+    return out
+
+
 # Cellular downlink bands the census desk can speak to from a scan:
 # (low Hz, high Hz, band words). Presence only, graded PROBABLE.
 _DOWNLINK_BANDS = [
@@ -616,6 +648,10 @@ class RealSource:
             detail += "; %s %s" % (
                 tool, "present" if shutil.which(tool) else
                 "absent (its desks file the loss per dwell)")
+        detail += "; aptdec %s" % (
+            "present" if shutil.which("aptdec") else
+            "absent (satellite passes file their audio; APT imagery "
+            "is reported not decoded)")
         return True, detail
 
     def capabilities(self):
@@ -636,14 +672,16 @@ class RealSource:
         return caps
 
     # -------------------------------------------------------- raw capture
-    def _rtl_fm(self, freq_hz, mode, rate, seconds, squelch=0):
+    def _rtl_fm(self, freq_hz, mode, rate, seconds, squelch=0,
+                gain="23"):
         with tempfile.NamedTemporaryFile(suffix=".raw",
                                          delete=False) as fh:
             path = fh.name
         try:
             size = _stream_to_file(
                 ["rtl_fm", "-f", str(int(freq_hz)), "-M", mode,
-                 "-s", str(rate), "-g", "23", "-l", str(squelch), path],
+                 "-s", str(rate), "-g", gain, "-l", str(squelch),
+                 path],
                 path, seconds)
             if size == 0:
                 raise TunerLost("rtl_fm produced no audio")
@@ -655,7 +693,7 @@ class RealSource:
             except OSError:
                 pass
 
-    def _audio(self, freq_hz, mode, rate, seconds):
+    def _audio(self, freq_hz, mode, rate, seconds, gain="23"):
         """One rtl_fm capture as a list of int16 samples.
 
         Raises TunerLost when the capture produced no bytes at
@@ -663,7 +701,7 @@ class RealSource:
         partial samples it did get (fix: partial capture is
         evidence, not failure).
         """
-        raw = self._rtl_fm(freq_hz, mode, rate, seconds)
+        raw = self._rtl_fm(freq_hz, mode, rate, seconds, gain=gain)
         n = len(raw) // 2
         return list(struct.unpack("<%dh" % n, raw[:2 * n]))
 
@@ -1208,10 +1246,28 @@ class RealSource:
                 "quality": round(min(1.0, max(0.0, (best or 0.0) / 30.0)), 2),
                 "sat": p.get("sat"), "norad": p.get("norad")}
         if lock:
-            samples = self._audio(vfo["freq_hz"], "fm", 48000, 8.0)
-            feed["audio_b64"] = _wav_b64(samples, 48000)
+            # Record the whole remaining pass at maximum gain. APT
+            # imagery decodes from a continuous full-pass capture;
+            # the 8-second sample this feed used to take could never
+            # hold a picture. Maximum gain for the reason the ADS-B
+            # capture established in 0.1.3: this band, at a rural
+            # indoor antenna, reads near the idle floor at the house
+            # gain. The recording runs to the pass end or the dwell
+            # end, whichever comes first, and the stored copy is
+            # resampled to 11025 Hz.
+            end = min(t1, p.get("los") or t1)
+            now = time.time()
+            start = now if t0 <= now <= end else t0
+            seconds = max(0.0, end - start)
+            raw = self._rtl_fm(vfo["freq_hz"], "fm", 48000, seconds,
+                               gain="49.6")
+            samples = array.array("h")
+            samples.frombytes(raw[:len(raw) - len(raw) % 2])
+            stored = _resample_int16(samples, 48000, 11025)
+            feed["audio_b64"] = _wav_b64(stored, 11025)
             feed["audio_name"] = "pass-%s-%d.wav" % (p.get("norad"),
                                                      int(t0))
+            feed["audio_rate"] = 11025
         return feed
 
     def _feed_sonde(self, vfos, center_hz, bw_hz, t0, t1):
