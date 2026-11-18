@@ -7,10 +7,10 @@ staged, not decoded (with the reason) when it is not - and the
 bounded post-pass decode files its outcome as an imagery event
 beside the pass record, which stands either way. Containment:
 every planned reception carries an allocation computed from its
-own arithmetic, the muster budget degrades in a stated order
-when the bill cannot fit the ceiling, consumption is accounted
-live against the allocations, and a capture truncates at its
-allocation.
+own arithmetic, grants against the home's standing pool shrink
+in a stated order when the bill cannot fit it, consumption is
+accounted live against the grants, and a capture truncates at
+its grant.
 """
 
 import base64
@@ -141,24 +141,36 @@ def test_apt_reservation_is_stored_rate_times_window():
     assert alloc["bytes"] == 600 * 22050 + budget.APT_PNG_ALLOWANCE
 
 
-def test_budget_aggregates_classes_desks_and_reserve(profile):
+def test_grants_aggregate_classes_and_reserve(profile, home):
+    # Adapted to the standing model: the aggregates are the
+    # watch's grants in the home's ledger, and the satellite
+    # figure is the pool's open satellite reservation. The
+    # windows are short because the pool also reads the home's
+    # actual disk state, and the test home sits on a small
+    # scratch filesystem: the bill must fit both.
     profile["watch"]["disk_ceiling_gb"] = 20.0
-    bill = [_pass_item("bill-001", "METEOR-M2 4"),
-            _pass_item("bill-002", "NOAA 19"),
+    bill = [_pass_item("bill-001", "METEOR-M2 4", window=60),
+            _pass_item("bill-002", "NOAA 19", window=300),
             _dwell_item("bill-003", "B", dur=300)]
     budget.annotate_bill(bill)
-    rb = budget.build_reception_budget(profile, bill)
-    s = rb.summary()
-    assert s["degraded"] == []
-    assert s["satellite_reserve_bytes"] == \
-        bill[0]["allocation"]["bytes"] + bill[1]["allocation"]["bytes"]
-    assert s["by_class"]["A"]["bytes"] == s["satellite_reserve_bytes"]
-    assert s["by_class"]["B"]["bytes"] == bill[2]["allocation"]["bytes"]
-    assert s["by_desk"]["satellite"] == s["satellite_reserve_bytes"]
-    assert s["total_bytes"] == sum(i["allocation"]["bytes"] for i in bill)
-    assert s["free_margin_bytes"] == s["ceiling_bytes"] - s["total_bytes"]
-    assert rb.allocation_for("bill-001") == bill[0]["allocation"]["bytes"]
-    assert rb.allocation_for("bill-999") is None
+    ledger = budget.AllocationLedger.load(home)
+    grants, statements, pool = budget.request_watch_grants(
+        ledger, profile, W, bill, T0)
+    assert statements == []
+    sat = bill[0]["allocation"]["bytes"] + bill[1]["allocation"]["bytes"]
+    assert pool["satellite_reserve_bytes"] == sat
+    sl = budget.watch_slice(ledger, W)
+    assert sl["by_class"]["A"]["granted"] == sat
+    assert sl["satellite_bytes"] == sat
+    assert sl["by_class"]["B"]["granted"] == \
+        bill[2]["allocation"]["bytes"]
+    assert sl["granted_bytes"] == \
+        sum(i["allocation"]["bytes"] for i in bill)
+    assert pool["free_bytes"] == pool["cap_bytes"] \
+        - pool["margin_bytes"] - sl["granted_bytes"]
+    assert grants["bill-001"]["bytes"] == \
+        bill[0]["allocation"]["bytes"]
+    assert "bill-999" not in grants
 
 
 def test_dwell_allocation_charges_capture_rates_and_census(profile):
@@ -174,8 +186,9 @@ def test_dwell_allocation_charges_capture_rates_and_census(profile):
 
 # ------------------------------------------------- muster degradation
 
-def test_degradation_floors_c_then_b_and_holds_satellite(profile):
-    # Conftest ceiling: 0.05 GB, usable 47.5 MB. An APT pass
+def test_degradation_floors_c_then_b_and_holds_satellite(profile,
+                                                         home):
+    # Conftest ceiling: 0.05 GB, grantable 47.5 MB. An APT pass
     # reserves about 17.2 MB; ten class C dwells and five class
     # B dwells at full rate cannot fit beside it.
     bill = [_pass_item("bill-001", "NOAA 19")]
@@ -184,30 +197,36 @@ def test_degradation_floors_c_then_b_and_holds_satellite(profile):
     bill += [_dwell_item("bill-2%02d" % i, "B", dur=600)
              for i in range(5)]
     budget.annotate_bill(bill)
-    rb = budget.build_reception_budget(profile, bill)
-    assert rb.degraded, "the budget must say it degraded"
-    assert "class C" in rb.degraded[0]
-    assert any("class B" in s for s in rb.degraded)
-    # The satellite reservation held at its computed size.
-    assert rb.allocation_for("bill-001") == \
+    ledger = budget.AllocationLedger.load(home)
+    grants, statements, _pool = budget.request_watch_grants(
+        ledger, profile, W, bill, T0)
+    assert statements, "the grants must say they shrank"
+    assert "class C" in statements[0]
+    assert any("class B" in s for s in statements)
+    # The satellite grant held at its computed size.
+    assert grants["bill-001"]["bytes"] == \
         600 * 22050 + budget.APT_PNG_ALLOWANCE
-    assert not any("satellite" in s for s in rb.degraded)
-    assert rb.total_bytes <= int(0.05e9 * 0.95)
+    assert not any("satellite" in s for s in statements)
+    assert sum(g["bytes"] for g in grants.values()) <= \
+        int(0.05e9 * 0.95)
 
 
-def test_degradation_reaches_satellite_last_and_says_so(profile):
-    profile["watch"]["disk_ceiling_gb"] = 0.0005  # 500 KB usable-ish
+def test_degradation_reaches_satellite_last_and_says_so(profile,
+                                                        home):
+    profile["watch"]["disk_ceiling_gb"] = 0.0005  # 500 KB cap
     bill = [_pass_item("bill-001", "METEOR-M2 4"),
             _dwell_item("bill-002", "C", dur=600)]
     budget.annotate_bill(bill)
-    rb = budget.build_reception_budget(profile, bill)
-    assert any("class C" in s for s in rb.degraded)
-    assert any("satellite pass reservations reduced" in s
-               for s in rb.degraded)
-    # Even floored, two items at the 1 MB floor cannot fit a
-    # 500 KB ceiling: the budget states the overage honestly.
-    assert "still exceeds" in rb.degraded[-1]
-    assert rb.allocation_for("bill-001") == budget.FLOOR_BYTES
+    ledger = budget.AllocationLedger.load(home)
+    grants, statements, _pool = budget.request_watch_grants(
+        ledger, profile, W, bill, T0)
+    assert any("class C" in s for s in statements)
+    assert any("satellite pass grants reduced" in s
+               for s in statements)
+    # Even floored, two items at the 1 MB floor cannot fit the
+    # pool's grantable room: the overage is stated honestly.
+    assert "still exceeds" in statements[-1]
+    assert grants["bill-001"]["bytes"] == budget.FLOOR_BYTES
 
 
 # ------------------------------------------------- LRPT desk honesty
@@ -384,7 +403,13 @@ def test_live_accounting_and_allocation_refusal(home, profile, index):
     runner = _runner(home, profile, index)
     bill = [_dwell_item("bill-001", "B", dur=60)]
     budget.annotate_bill(bill)
-    runner.budget = budget.build_reception_budget(profile, bill)
+    # The watch's grants stand in the home's ledger now, and
+    # consumption posts against them as receptions file.
+    ledger = budget.AllocationLedger.load(home)
+    grants, _statements, _pool = budget.request_watch_grants(
+        ledger, profile, W, bill, T0)
+    runner.ledger = ledger
+    runner.grants = grants
     runner._bill_cls = {i["id"]: i["cls"] for i in bill}
     from multidex.events import make_event
     ev = make_event(W, "airband", "voice", T0, T0 + 60)
@@ -392,13 +417,14 @@ def test_live_accounting_and_allocation_refusal(home, profile, index):
                "b64": base64.b64encode(b"\x01" * 4096).decode()}
     runner._file_snippet(ev, "airband", "bill-001", payload)
     assert ev["snippet"]
-    state = runner._budget_state()
-    assert state["consumed_bytes"] == 4096
+    state = runner._pool_state()
+    assert state["watch_consumed_bytes"] == 4096
+    assert state["consumed_bytes"] == 4096  # the pool's own figure
     assert state["by_class"]["B"]["consumed"] == 4096
-    assert state["allocated_bytes"] == runner.budget.total_bytes
-    # A payload that would cross the item's allocation is
-    # refused at filing, with the refusal on the record.
-    alloc = runner.budget.allocation_for("bill-001")
+    assert state["watch_granted_bytes"] == grants["bill-001"]["bytes"]
+    # A payload that would cross the item's grant is refused at
+    # filing, with the refusal on the record.
+    alloc = grants["bill-001"]["bytes"]
     big = {"filename": "huge.wav", "kind": "voice",
            "b64": base64.b64encode(b"\x02" * (alloc + 1)).decode()}
     ev2 = make_event(W, "airband", "voice", T0 + 120, T0 + 180)
@@ -407,7 +433,7 @@ def test_live_accounting_and_allocation_refusal(home, profile, index):
     refusals = [e for e in index.events(watch_id=W, kinds=["system"])
                 if "reception allocation" in (e["content"] or "")]
     assert len(refusals) == 1
-    assert runner._budget_state()["consumed_bytes"] == 4096
+    assert runner._pool_state()["watch_consumed_bytes"] == 4096
 
 
 def test_file_payload_moves_by_reference(home, profile, index,
@@ -473,7 +499,7 @@ def test_lrpt_capture_truncates_at_byte_cap(monkeypatch):
 def test_doctor_reports_satdump_and_budget(profile, home):
     text = gates.doctor_text(profile, home)
     assert "satellite LRPT" in text
-    assert "Reception budget for this profile" in text
+    assert "Reception pool for this home" in text
 
 
 def test_report_reception_account_and_live_state(home, profile):
@@ -491,29 +517,37 @@ def test_report_reception_account_and_live_state(home, profile):
     wdir = os.path.join(home, "watches", watch_id)
     from multidex import util
     meta = util.read_json(os.path.join(wdir, "watch.json"))
-    assert meta["reception_budget"]["ceiling_bytes"] == 50000000
-    assert os.path.exists(os.path.join(wdir, "budget.json"))
-    state = util.read_json(os.path.join(wdir, "state.json"))
-    assert state["budget"]["allocated_bytes"] > 0
-    # The satellite reserve is exactly the bill's pass
-    # allocations, whatever passes the window held.
+    # The meta names the standing pool the watch drew on, not a
+    # private budget: the cap is the home's standing cap.
+    assert meta["reception_pool"]["cap_bytes"] == 50000000
+    assert meta["reception_grants"]["granted_bytes"] > 0
+    # budget.json is a snapshot view of the ledger at muster:
+    # it carries the pool figures and one grant per bill item.
+    snap = util.read_json(os.path.join(wdir, "budget.json"))
+    assert snap["pool"]["cap_bytes"] == 50000000
     bill = util.read_json(os.path.join(wdir, "bill.json"))
-    expected_reserve = sum(
-        budget.item_allocation(i)["bytes"] for i in bill
-        if i.get("kind") == "pass" and "satellite" in i["desks"])
-    assert state["budget"]["satellite_reserve_bytes"] == \
-        expected_reserve
+    assert {g["bill_id"] for g in snap["grants"]} == \
+        {i["id"] for i in bill}
+    state = util.read_json(os.path.join(wdir, "state.json"))
+    assert state["budget"]["cap_bytes"] == 50000000
+    assert state["budget"]["watch_granted_bytes"] > 0
+    # The standing satellite reservations exist independently
+    # of this watch's bill (the bill held no passes at all):
+    # they were taken at muster for the windows ahead and are
+    # still standing in the pool after stand-down.
+    assert state["budget"]["satellite_reserve_bytes"] > 0
     report = open(os.path.join(wdir, "REPORT.md")).read()
     assert "Reception account" in report
-    assert "Class A receptions: allocated" in report
+    assert "standing allocation pool" in report
+    assert "Class A receptions: granted" in report
     muster = open(os.path.join(wdir, "events.jsonl")).read()
-    assert "reception budget: ceiling" in muster
-    # Status surfaces the same budget while a watch stands:
+    assert "reception allocations: the standing pool" in muster
+    # Status surfaces the same pool while a watch stands:
     # present this watch's state as live and read it back.
     state["complete"] = False
     state["pid"] = os.getpid()
     util.write_json(os.path.join(wdir, "state.json"), state)
     util.write_json(os.path.join(home, "current_watch"), watch_id)
     status = products.status_text(home)
-    assert "Reception budget:" in status
-    assert "satellite reserve" in status
+    assert "Reception pool:" in status
+    assert "standing cap" in status

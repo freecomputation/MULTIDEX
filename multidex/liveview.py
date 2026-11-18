@@ -167,7 +167,7 @@ def _totals_rows(view, pal):
                util.fmt_duration(t["planned_s"]), t["gaps"]))
     rows = [[(line, pal["normal"])]]
     if t.get("budget_allocated_bytes") is not None:
-        rows.append([("Reception budget %d of %d bytes consumed"
+        rows.append([("Reception pool %d of %d bytes consumed"
                       % (t["budget_consumed_bytes"] or 0,
                          t["budget_allocated_bytes"]),
                       pal["normal"])])

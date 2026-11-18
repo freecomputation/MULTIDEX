@@ -301,8 +301,15 @@ def build_view(raw, now=None):
             "executed_s": raw["executed_s"],
             "planned_s": planned_dwell,
             "gaps": raw["gaps"],
+            # The dashboard's budget row reads the standing
+            # pool: consumed against the pool's cap (state files
+            # from before the standing ledger carry only the
+            # per-watch allocated figure, which stands in).
             "budget_allocated_bytes":
-                (state.get("budget") or {}).get("allocated_bytes"),
+                (state.get("budget") or {}).get(
+                    "cap_bytes",
+                    (state.get("budget") or {}).get(
+                        "allocated_bytes")),
             "budget_consumed_bytes":
                 (state.get("budget") or {}).get("consumed_bytes"),
         },

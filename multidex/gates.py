@@ -193,30 +193,39 @@ def doctor_text(profile, home):
     lines.append("Source capabilities: %s"
                  % (", ".join(sorted(capabilities)) if capabilities
                     else "all desks (simulated source)"))
-    # The reception budget's shape for this profile, computed on
-    # a bill built from now: the same numbers muster will state,
-    # so a short ceiling is visible before any watch stands.
+    # The standing allocation pool for this home, read from its
+    # ledger: a property of the installation, stated the same
+    # whether or not a watch stands. Doctor also refreshes the
+    # standing satellite reservations from the ephemeris, so
+    # the passes ahead hold their reservations between watches.
     # Local imports: the officer imports this module.
     try:
         import time as _time
         from . import budget as _budget_mod
-        from . import officer as _officer_mod
+        _ledger = _budget_mod.AllocationLedger.load(home)
         _sats, _path = load_sats(profile)
-        _bill = _officer_mod.build_bill(profile, _time.time(),
-                                        _sats)
-        _rb = _budget_mod.build_reception_budget(profile, _bill)
-        _s = _rb.summary()
-        lines.append("Reception budget for this profile: ceiling "
-                     "%d bytes; a bill built from now allocates "
-                     "%d bytes worst case, %d of it satellite "
-                     "reserve, %d bytes free margin"
-                     % (_s["ceiling_bytes"], _s["total_bytes"],
-                        _s["satellite_reserve_bytes"],
-                        _s["free_margin_bytes"]))
-        for _statement in _s["degraded"]:
-            lines.append("Reception budget degraded: %s"
-                         % _statement)
+        _created, _expired = _budget_mod.refresh_reserves(
+            _ledger, profile, _sats, _time.time())
+        _ledger.set_cap(_budget_mod.cap_bytes(profile))
+        _p = _ledger.pool()
+        lines.append("Reception pool for this home: standing "
+                     "cap %d bytes; %d consumed, %d reserved in "
+                     "%d open grants (%d of it satellite "
+                     "reservations), %d free; a margin of %d "
+                     "bytes is never granted"
+                     % (_p["cap_bytes"], _p["consumed_bytes"],
+                        _p["reserved_bytes"], _p["open_grants"],
+                        _p["satellite_reserve_bytes"],
+                        _p["free_bytes"] or 0, _p["margin_bytes"]))
+        if _created:
+            lines.append("Standing satellite reservations: %d "
+                         "new reservations taken for passes in "
+                         "the next 48 hours" % _created)
+        if _expired:
+            lines.append("Standing satellite reservations: %d "
+                         "reservations expired unclaimed and "
+                         "were released" % _expired)
     except Exception as exc:
-        lines.append("Reception budget: could not be computed "
+        lines.append("Reception pool: could not be read "
                      "(%s: %s)" % (type(exc).__name__, exc))
     return "\n".join(lines)
