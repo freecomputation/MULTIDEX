@@ -48,8 +48,14 @@ DEFAULTS = {
         "stand": ["adsb", "airband", "milair", "acars", "ais", "wxradio",
                   "ism", "aprs", "pager", "sweep", "satellite", "sonde",
                   "cellular", "trunking", "broadcast", "audiocensus",
-                  "amateur", "iss", "vdl2", "digitalvoice"],
+                  "amateur", "iss", "vdl2", "digitalvoice", "probe"],
         "bench": [],
+    },
+    "probe": {
+        "max_per_watch": 4,
+        "max_seconds_per_watch": 2400,
+        "dwell_s": 600,
+        "min_observations": 2,
     },
     "applicability": {
         "marine_range_km": 100,
@@ -203,6 +209,24 @@ def _hard_problems(profile):
                                 % (name,))
                 else:
                     forced[name] = section
+    probe = profile.get("probe", {})
+    if probe is not None and not isinstance(probe, dict):
+        hard.append("probe section is not a table")
+    elif isinstance(probe, dict):
+        for key in ("max_per_watch", "max_seconds_per_watch",
+                    "dwell_s"):
+            value = probe.get(key)
+            if value is not None and (not _is_number(value)
+                                      or value <= 0):
+                hard.append("probe %s must be a positive number"
+                            % key)
+        min_obs = probe.get("min_observations")
+        if min_obs is not None and (not _is_number(min_obs)
+                                    or min_obs < 1):
+            hard.append("probe min_observations must be a number "
+                        "at least 1; a candidate is by definition "
+                        "heard at least twice, and a value under 1 "
+                        "would bill stares at single hearings")
     transcription = profile.get("transcription", {})
     if isinstance(transcription, dict):
         for name in transcription.get("desks", []) or []:

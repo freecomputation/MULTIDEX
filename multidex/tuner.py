@@ -767,7 +767,7 @@ class RealSource:
         caps = {"sweep", "adsb", "airband", "milair", "ais", "wxradio",
                 "ism", "aprs", "pager", "satellite", "sonde", "broadcast",
                 "cellular", "trunking", "acars", "audiocensus",
-                "amateur", "iss"}
+                "amateur", "iss", "probe"}
         # Tool-bound desks stand on the real source only when their
         # decoder program is present on the host; desk_state states
         # the staging reason when they are not.
@@ -1107,6 +1107,77 @@ class RealSource:
               + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
         return audiocensus.analyze(iq, float(rate), center_hz,
                                    extract_cap=6)
+
+    def _feed_probe(self, vfos, center_hz, bw_hz, t0, t1):
+        """The probe stare on the real source (0.11.0): one
+        contiguous IQ block at the dwell's start, bounded at
+        20 s, run through the census engine, with the target
+        channel excerpted for the feature tree. The context
+        states exactly what the block holds: the emission's
+        onset and end inside the block, read from the
+        channel's own activity blocks. The real source keeps
+        no pre-dwell ring buffer, so context outside this one
+        block does not exist, and the feed says so."""
+        import numpy as np
+        from . import audiocensus
+        rate = 2400000
+        seconds = min(20.0, max(5.0, t1 - t0))
+        raw = self._iq(center_hz, rate, int(rate * seconds),
+                       seconds=int(seconds) + 30)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        census = audiocensus.analyze(iq, float(rate), center_hz,
+                                     extract_cap=6)
+        cand = None
+        for c in census.get("candidates") or []:
+            if abs(c["freq_hz"] - center_hz) <= bw_hz / 2:
+                if cand is None or c["snr_db"] > cand["snr_db"]:
+                    cand = c
+        excerpt = None
+        pre_s = None
+        post_s = None
+        if cand is not None:
+            chan, crate = audiocensus._extract(
+                iq, float(rate), cand["freq_hz"] - center_hz,
+                cand["bw_hz"])
+            exc = audiocensus._excerpt(chan, crate)
+            if exc is not None:
+                exc["freq_hz"] = cand["freq_hz"]
+                exc["bw_hz"] = cand["bw_hz"]
+                excerpt = exc
+            # The emission's span inside the block, from the
+            # channel's quarter-second activity blocks (the
+            # duty estimate's own blocks): first and last
+            # block over the activity threshold.
+            block = max(1, int(crate * 0.25))
+            nblocks = len(chan) // block
+            if nblocks >= 2:
+                energy = np.array([float(np.mean(np.abs(
+                    chan[i * block:(i + 1) * block]) ** 2))
+                    for i in range(nblocks)])
+                med = np.median(energy) + 1e-20
+                active = energy > max(med * 4.0,
+                                      energy.max() * 0.05)
+                idx = np.nonzero(active)[0]
+                if len(idx):
+                    pre_s = round(float(idx[0]) * block / crate, 1)
+                    post_s = round(
+                        (len(chan) - (int(idx[-1]) + 1) * block)
+                        / crate, 1)
+        context = {
+            "capture_s": seconds, "pre_s": pre_s, "post_s": post_s,
+            "note": "one contiguous capture at the dwell's "
+                    "start; the real source keeps no pre-dwell "
+                    "ring buffer, so no context outside this "
+                    "block exists"}
+        return {"target_freq_hz": float(center_hz),
+                "census": census, "excerpt": excerpt,
+                "silent": cand is None,
+                "snr_db": cand["snr_db"] if cand else None,
+                "context": context}
 
     def _feed_amateur(self, vfos, center_hz, bw_hz, t0, t1):
         """Amateur desk: CW decoded in pure Python from an IQ

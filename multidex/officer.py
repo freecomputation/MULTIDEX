@@ -18,7 +18,7 @@ import threading
 import time
 
 from . import applicability, budget, displayfeed, gates, orbit, \
-    products, retention, updater, util
+    probe, products, retention, updater, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -552,6 +552,36 @@ class WatchRunner:
         self._applicability_decisions = decisions
         bill = build_bill(profile, start, sats,
                           stood_down=set(self.stood_down_desks))
+        # The probe plan (0.11.0): the candidate list is
+        # computed from the Index at muster and the stares are
+        # billed as class P inside the profile's probe budget,
+        # before grants are taken, so a stare draws its grant
+        # like every other reception. A benched or stood-down
+        # probe desk bills nothing, and the reason is filed
+        # with the muster account below.
+        self._probe_chosen = []
+        self._probe_note = None
+        if self._desk_benched_reason("probe", source) is not None:
+            self._probe_note = ("the probe desk is benched on "
+                                "this host, so no stares are "
+                                "billed")
+        elif "probe" in self.stood_down_desks:
+            self._probe_note = ("the probe desk is stood down "
+                                "at this home, so no stares are "
+                                "billed")
+        else:
+            cands = probe.candidates(self.index, profile)
+            bill, self._probe_chosen = probe.plan_items(
+                bill, profile, cands, start)
+            if not cands:
+                self._probe_note = ("no probe candidates: the "
+                                    "record holds no emitter "
+                                    "that is both unresolved "
+                                    "and recurring")
+            elif not self._probe_chosen:
+                self._probe_note = ("probe candidates exist "
+                                    "but the probe budget "
+                                    "bills no stares this watch")
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
         # Reception containment: this watch's allocations are
         # grants against the home's standing allocation ledger,
@@ -597,6 +627,10 @@ class WatchRunner:
             "generation": self.generation,
             "source_note": source_note,
             "stood_down": dict(self.stood_down_desks),
+            "probe": {
+                "planned_stares": len(self._probe_chosen),
+                "budget": dict(profile.get("probe") or {}),
+                "note": self._probe_note},
             "time_scale": self._scale,
             "reception_pool": pool_after,
             "reception_grants": {
@@ -692,6 +726,35 @@ class WatchRunner:
                     data={"desk": name,
                           "applicability_override": True,
                           "reason": decision["reason"]}))
+        # The probe account, filed with the muster record: what
+        # the Index offered, what the budget billed, and why,
+        # when nothing was billed.
+        if self._probe_chosen:
+            pcfg = profile.get("probe") or {}
+            probe_statement = (
+                "%d stare(s) billed as class P inside the probe "
+                "budget (at most %s stares, %s s): %s"
+                % (len(self._probe_chosen),
+                   pcfg.get("max_per_watch"),
+                   pcfg.get("max_seconds_per_watch"),
+                   "; ".join(
+                       "%s (%d unresolved hearings, mean SNR "
+                       "%s dB)" % (
+                           c.get("emitter")
+                           or "%.3f MHz" % (c["freq_hz"] / 1e6),
+                           c["observations"], c["mean_snr_db"])
+                       for c in self._probe_chosen)))
+        else:
+            probe_statement = self._probe_note or \
+                "no stares billed"
+        self._file(make_event(
+            watch_id, "officer", "system", start, start,
+            grade="CONFIRMED",
+            content="probe plan: %s" % probe_statement,
+            data={"probe_plan": {
+                "planned": len(self._probe_chosen),
+                "note": self._probe_note,
+                "candidates": self._probe_chosen}}))
         # Update stages the check worker queued while no officer
         # was filing land in the Index now, and a generation the
         # keeper flipped to with no watch standing begins its
@@ -1166,8 +1229,13 @@ class WatchRunner:
                 standing.append(name)
         # The audio census rides every captured window (rotation,
         # sweep and pass items alike): it is a window desk with no
-        # channels of its own, fed from the window's IQ.
+        # channels of its own, fed from the window's IQ. A probe
+        # item is the one exception: the probe's own feed carries
+        # the census analysis of the stare, and the probe desk
+        # files the census attempt itself, so a second census of
+        # the same window would file the same hearing twice.
         if "audiocensus" not in standing and \
+                item.get("kind") != "probe" and \
                 self._desk_benched_reason("audiocensus", source) is None:
             standing.append("audiocensus")
         desk_channels = {name: channels_for(name) for name in standing}
@@ -1238,6 +1306,17 @@ class WatchRunner:
                                 self.profile["home"]["lon"]),
                        "profile": self.profile,
                        "pass": item.get("pass")}
+                if name == "probe":
+                    # The target's full record rides the ctx,
+                    # assembled from the Index at execution time
+                    # so the vote and the discrimination checks
+                    # judge every hearing up to the stare itself
+                    # (0.11.0). The candidate itself rides the
+                    # feed, so the desk files the stare under
+                    # the dossier it belongs to.
+                    ctx["probe"] = probe.execution_context(
+                        self.index, item.get("probe_target") or {})
+                    feed["target"] = item.get("probe_target") or {}
                 # Per-desk isolation: one desk's processing failure
                 # files as that desk's gap; the dwell's other desks
                 # are unaffected.

@@ -118,6 +118,13 @@ AUDIO_BYTES_PER_S = {
 # for the records themselves.
 EVENT_ALLOWANCE = 262144
 
+# A probe stare's allowance (0.11.0): one tier 2 SigMF excerpt
+# pair (bounded at the census excerpt cap, two files of at most
+# about 400 KB) plus its record events, as a fixed allowance.
+# The stare's real cost is its tuner time, not a byte stream,
+# so it is not charged at a per-second rate.
+PROBE_ALLOCATION_BYTES = 2_000_000
+
 # Degradation: allowances fall to this floor per item, in class
 # priority order, before any satellite reservation is touched.
 FLOOR_BYTES = 1_000_000
@@ -195,6 +202,8 @@ def item_allocation(item):
     bytes, by the arithmetic in this module's docstring."""
     dur = float(item.get("dur") or 0)
     desks = item.get("desks") or []
+    if item.get("kind") == "probe":
+        return {"tuner_s": dur, "bytes": PROBE_ALLOCATION_BYTES}
     if item.get("kind") == "pass" and "satellite" in desks:
         window = pass_window_s(item)
         kind = downlink_kind((item.get("pass") or {}).get("sat"))

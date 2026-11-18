@@ -95,6 +95,7 @@ SPECS = {
     "cellular":  (3, "Cellular survey", "light", "window"),
     "trunking":  (3, "Trunking census", "light", "window"),
     "sweep":     (3, "Spectrum census and anomaly", "light", "window"),
+    "probe":     (3, "Probe of the unexplained", "moderate", "window"),
 }
 
 # Desks this build benches with the reason stated, whatever the
@@ -829,6 +830,38 @@ def process_audiocensus(feed, ctx):
                         "tones) found by the audio census; not "
                         "voice and not graded as voice",
                 data=data)
+        elif grade_letter == "TONE":
+            # A tone is filed as a tone (0.11.0): the grader's
+            # tone gate caught one persistent narrow peak with
+            # no syllabic modulation, so the event states the
+            # tone's frequency and stability and claims no
+            # voice. Its source stays unexplained, so the
+            # hearing is UNRESOLVED like any other census
+            # unknown - and it can earn a probe stare.
+            tparts = cand.get("grade_parts") or {}
+            data["tone_freq_hz"] = tparts.get("tone_freq_hz")
+            data["tone_concentration"] = tparts.get(
+                "tone_concentration")
+            data["tone_stability"] = tparts.get(
+                "spectral_dynamics")
+            ev = make_event(
+                ctx["watch_id"], "audiocensus", "observation",
+                ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
+                emitter=emitter, grade="UNRESOLVED",
+                content="steady tone heard by the audio census: "
+                        "one narrow peak at about %s Hz in the "
+                        "demodulated audio and its harmonics hold "
+                        "%s of the audio power, with no syllabic "
+                        "modulation and no spectral movement; "
+                        "filed as a tone, not as possible voice"
+                        % (tparts.get("tone_freq_hz"),
+                           tparts.get("tone_concentration")),
+                data=data)
+            if cand.get("excerpt"):
+                _attach_excerpt(
+                    ev, cand["excerpt"], ctx,
+                    "audiocensus-%d" % int(cand["freq_hz"]),
+                    cand["freq_hz"])
         elif grade_letter in ("A", "B", "C"):
             ev = make_event(
                 ctx["watch_id"], "audiocensus", "audio",
@@ -903,6 +936,366 @@ def process_audiocensus(feed, ctx):
                     % feed["over_cap"],
             data={"emitter_kind": "audio_emission",
                   "over_cap": feed["over_cap"]}))
+    return out
+
+
+# --------------------------------------------------------------- probe
+
+# The desks each classifier family belongs to, for the probe's
+# account of what a vote leaves open.
+_FAMILY_DESKS = {
+    "am-voice": ("airband", "milair", "amateur"),
+    "fm-voice": ("airband", "wxradio", "amateur"),
+    "ssb-voice": ("amateur",),
+    "fsk-data": ("pager", "aprs", "ism", "acars", "vdl2", "hfdl",
+                 "digitalvoice"),
+    "cw": ("amateur",),
+    "tone": (),
+    "noise": (),
+}
+
+# Why no in-process attempt is filed for a desk the vote
+# leaves open, per desk. An attempt that cannot honestly be
+# made is stated, never faked: silence from a desk is not a
+# negative result, and neither is a reason it was not tried.
+_NOT_ATTEMPTED = {
+    "airband": "voice on this desk is filed from its own "
+               "channel captures; the audio census attempt on "
+               "the stare is the in-process voice attempt this "
+               "build can make",
+    "milair": "voice on this desk is filed from its own "
+              "channel captures; the audio census attempt on "
+              "the stare is the in-process voice attempt this "
+              "build can make",
+    "wxradio": "this desk reads SAME headers from its own "
+               "channel captures; the audio census attempt on "
+               "the stare is the in-process voice attempt this "
+               "build can make",
+    "amateur": "the in-process amateur attempt is CW, which "
+               "runs on narrowband excerpts; this excerpt is "
+               "not narrowband, and SSB voice is the census "
+               "attempt's ground",
+    "pager": "its decoder reads its own captures through the "
+             "host tool path; no in-process attempt from a "
+             "channel excerpt exists in this build",
+    "aprs": "its decoder reads its own captures through the "
+            "host tool path; no in-process attempt from a "
+            "channel excerpt exists in this build",
+    "ism": "its decoder reads its own captures through the "
+           "host tool path; no in-process attempt from a "
+           "channel excerpt exists in this build",
+    "vdl2": "its decoder is a bound host program that reads "
+            "its own captures; it cannot be run against a "
+            "channel excerpt in this build",
+    "hfdl": "its decoder is a bound host program that reads "
+            "its own captures; it cannot be run against a "
+            "channel excerpt in this build",
+    "digitalvoice": "its decoder is a bound host program that "
+                    "reads its own captures; it cannot be run "
+                    "against a channel excerpt in this build",
+    "acars": "the target is outside the ACARS channels, so "
+             "no ACARS attempt is meaningful",
+}
+
+_ACARS_CHANNELS = (131.45e6, 131.55e6, 131.725e6)
+
+
+def _context_sentence(context):
+    """The probe capture's context, stated in plain words from
+    the feed's own account: how much IQ the source held, and
+    how much of it sits before and after the emission, with
+    the source's note where it carries one. Nothing is
+    implied beyond what the feed states."""
+    if not context:
+        return "the capture carried no context statement"
+    parts = []
+    if context.get("capture_s") is not None:
+        parts.append("the capture holds %.1f s of IQ"
+                     % context["capture_s"])
+    if context.get("pre_s") is not None:
+        parts.append("%.1f s of it before the emission's onset"
+                     % context["pre_s"])
+    if context.get("post_s") is not None:
+        parts.append("%.1f s after its end" % context["post_s"])
+    if context.get("note"):
+        parts.append(context["note"])
+    return "; ".join(parts) if parts else \
+        "the capture carried no context statement"
+
+
+def process_probe(feed, ctx):
+    """The probe desk: one stare at one unexplained emitter.
+
+    The feed is the stare itself (the source's capture at the
+    target, its census analysis, and a channel excerpt with
+    its context stated). ctx carries the target's full Index
+    history, assembled by the officer, with each hearing's
+    per-burst family vote and the cross-band coincidence
+    count. The desk files, in order: the stare observation
+    (the excerpt rides it as a tier 2 SigMF pair), one
+    negative-result assessment per desk that attempted a
+    decode of the stare and filed none, the dossier-cluster
+    vote as an assessment, and the discrimination assessment
+    (cross-band coincidence, and recurrence folded on the
+    solar and sidereal clocks). Positive attempt outcomes
+    join the vote as observations and are named in the vote
+    assessment. The desk files no bearing claim: direction
+    finding is not part of this build.
+    """
+    from . import audiocensus as _ac
+    from . import classifier as _classifier
+    from . import probe as _probe
+    out = []
+    target = feed.get("target") or {}
+    freq = feed.get("target_freq_hz") or ctx.get("freq_hz")
+    emitter = target.get("emitter")
+    pctx = ctx.get("probe") or {}
+    history = pctx.get("history") or []
+    exc = feed.get("excerpt")
+    context = feed.get("context") or {}
+    snr = feed.get("snr_db")
+    label = emitter or ("%.3f MHz" % (freq / 1e6) if freq
+                        else "an unknown frequency")
+    # The stare's own classification, from its excerpt.
+    stare = None
+    chan = None
+    rate = None
+    if exc:
+        try:
+            chan, rate = _classifier.decode_excerpt(exc)
+            feats0 = _classifier.extract_features(chan, rate)
+            fam0, why0 = _classifier.classify(feats0)
+            stare = {"family": fam0,
+                     "features": {k: round(float(v), 4)
+                                  for k, v in feats0.items()},
+                     "reasons": why0}
+        except Exception:
+            stare = None
+    if stare:
+        family, feats, reasons = stare["family"], \
+            stare["features"], stare["reasons"]
+    elif feed.get("silent"):
+        family, feats, reasons = "unknown", {}, [
+            "the emitter was silent for the whole stare: the "
+            "capture holds noise only"]
+    else:
+        family, feats, reasons = "unknown", {}, [
+            "the stare held no classifiable excerpt"]
+    stare_ev = make_event(
+        ctx["watch_id"], "probe", "observation", ctx["t0"],
+        ctx["t1"], freq_hz=freq, emitter=emitter,
+        grade="UNRESOLVED",
+        content="probe stare at %s for %.0f s, on a target "
+                "with %d unresolved hearings in the record: "
+                "the feature tree classifies the stare as %s "
+                "(%s). Context: %s."
+                % (label, ctx["t1"] - ctx["t0"],
+                   target.get("observations", len(history)),
+                   family,
+                   reasons[0] if reasons else "no reason stated",
+                   _context_sentence(context)),
+        data={"emitter_kind": "probe_target",
+              "probe_target": target,
+              "classification": {"family": family,
+                                 "features": feats,
+                                 "reasons": reasons},
+              "context": context, "snr_db": snr,
+              "bw_hz": target.get("bw_hz"),
+              "silent": bool(feed.get("silent"))})
+    if exc:
+        _attach_excerpt(stare_ev, exc, ctx,
+                        "probe-%d" % int(freq), freq)
+    out.append(stare_ev)
+    sid = stare_ev["id"]
+    # The vote's inputs: every hearing of the cluster, then
+    # this stare.
+    votes = [(h.get("family") or "unknown", h.get("snr_db"))
+             for h in history]
+    if stare:
+        votes.append((family, snr))
+    # Decode attempts on the stare, run in process. Each
+    # attempt either decodes (a positive, which joins the
+    # vote) or files a negative result: a filed attempt is
+    # the only kind of failure that counts as one.
+    attempted = set()
+    positives = []
+    negatives = []
+    census = feed.get("census")
+    if census is not None:
+        attempted.add("audiocensus")
+        tol = max(25000.0, (target.get("bw_hz") or 0.0) / 2)
+        cand = None
+        for c in census.get("candidates") or []:
+            if freq and abs(c["freq_hz"] - freq) <= tol:
+                cand = c
+                break
+        if cand is not None and cand.get("grade") in (
+                "A", "B", "C", "DATA", "TONE"):
+            fam = _probe.family_of_event({"data": {
+                "modulation_estimate": cand.get("modulation"),
+                "voice_grade": cand.get("grade")}})
+            votes.append((fam, cand.get("snr_db")))
+            positives.append(
+                "the audio census classified the stare as %s "
+                "(grade %s, SNR %s dB)"
+                % (fam, cand.get("grade"), cand.get("snr_db")))
+        else:
+            negatives.append((
+                "audiocensus",
+                "the audio census analysis of the stare found "
+                "no classifiable candidate at the target "
+                "frequency" if cand is None else
+                "the audio census graded the stare's energy D "
+                "(score %s/100): no classification"
+                % cand.get("score", 0)))
+    if chan is not None \
+            and feats.get("occupied_bw_hz", 1e9) <= 3000.0:
+        attempted.add("amateur")
+        from . import cw as _cw
+        try:
+            found = _cw.detect(chan, rate)
+        except Exception:
+            found = []
+        texts = [f for f in found if f.get("text")]
+        if texts:
+            positives.append(
+                "CW decoded in the stare by the amateur path: "
+                "%s" % "; ".join(
+                    "%r at about %s wpm" % (f["text"][:40],
+                                            f.get("wpm"))
+                    for f in texts[:2]))
+            votes.append(("cw", snr))
+        else:
+            negatives.append((
+                "amateur",
+                "no CW signal decoded in the stare excerpt"))
+    if chan is not None and freq and any(
+            abs(freq - ch) <= 25000.0 for ch in _ACARS_CHANNELS):
+        attempted.add("acars")
+        from . import acars as _acars
+        klass = {"am-voice": "AM", "fm-voice": "FM",
+                 "ssb-voice": "USB"}.get(family, "AM")
+        try:
+            audio = _ac._demod(chan, rate, klass)
+            messages = _acars.decode_audio(
+                audio, _ac.AUDIO_RATE)
+        except Exception:
+            messages = []
+        if messages:
+            positives.append(
+                "ACARS decoded in the stare: %d verified "
+                "frame(s)" % len(messages))
+            votes.append(("fsk-data", snr))
+        else:
+            negatives.append((
+                "acars",
+                "no CRC-verified ACARS frame decoded from the "
+                "stare's demodulated audio"))
+    for desk, detail in negatives:
+        out.append(make_event(
+            ctx["watch_id"], "probe", "assessment", ctx["t0"],
+            ctx["t1"], freq_hz=freq, emitter=emitter,
+            grade="CONFIRMED",
+            content="negative result: %s attempted a decode "
+                    "of the probe stare at %s and filed no "
+                    "decode: %s" % (desk, label, detail),
+            data={"rule": "probe_negative_result",
+                  "attempted_desk": desk, "outcome": "no decode",
+                  "detail": detail},
+            links=[sid]))
+    # The cluster vote, filed as the desk's assessment.
+    v = _probe.vote(votes)
+    split_txt = ", ".join(
+        "%s %d" % (fam, s["count"])
+        for fam, s in sorted(v["split"].items()))
+    open_families = set(v["split"])
+    if v["family"]:
+        open_families.discard(v["family"])
+    not_attempted = []
+    open_desks = set()
+    for fam in open_families:
+        open_desks.update(_FAMILY_DESKS.get(fam, ()))
+    for desk in sorted(open_desks - attempted - {"audiocensus"}):
+        not_attempted.append({
+            "desk": desk,
+            "reason": _NOT_ATTEMPTED.get(
+                desk, "no in-process attempt from a channel "
+                      "excerpt exists in this build")})
+    if v["family"]:
+        vote_content = (
+            "probe cluster vote on %s: %d observations classify "
+            "as %s with %.0f percent of the SNR weight, over "
+            "the %.0f percent margin on at least %d "
+            "observations (split: %s); the dossier carries %s"
+            % (label, v["observations"], v["family"],
+               v["share"] * 100, _probe.VOTE_MARGIN * 100,
+               _probe.VOTE_MIN_OBSERVATIONS, split_txt,
+               v["family"]))
+        vote_grade = "PROBABLE"
+    else:
+        vote_content = (
+            "probe cluster vote on %s: %d observations do not "
+            "resolve: the leading family %s holds %.0f percent "
+            "of the SNR weight against a %.0f percent margin "
+            "(split: %s); the dossier stays UNRESOLVED and "
+            "the split is the finding"
+            % (label, v["observations"], v["leading"],
+               v["share"] * 100, _probe.VOTE_MARGIN * 100,
+               split_txt))
+        vote_grade = "UNRESOLVED"
+    if positives:
+        vote_content += ". Positive attempts: %s." % "; ".join(
+            positives)
+    out.append(make_event(
+        ctx["watch_id"], "probe", "assessment", ctx["t0"],
+        ctx["t1"], freq_hz=freq, emitter=emitter,
+        grade=vote_grade, content=vote_content,
+        data={"rule": "probe_cluster_vote",
+              "baseline": "%d observations in the cluster"
+                          % v["observations"],
+              "vote": v, "positives": positives,
+              "not_attempted": not_attempted},
+        links=[sid]))
+    # Discrimination: coincidence and the two clocks, over
+    # the cluster's full history plus this stare.
+    times = [h["t"] for h in history] + [ctx["t0"]]
+    rec = _probe.recurrence(times)
+    coin = pctx.get("coincidence") or {}
+    if not coin.get("windows_checked"):
+        coin_txt = ("no earlier hearings to check coincidence "
+                    "against")
+    elif not coin.get("by_band"):
+        coin_txt = ("in %d windows of plus or minus %d s "
+                    "around the cluster's hearings, nothing on "
+                    "another band fired with this emitter"
+                    % (coin["windows_checked"],
+                       coin.get("window_s", 120)))
+    else:
+        coin_txt = ("hearings with another band active within "
+                    "plus or minus %d s: %s"
+                    % (coin.get("window_s", 120), ", ".join(
+                        "%s band in %d window(s)" % (b, n)
+                        for b, n in sorted(
+                            coin["by_band"].items()))))
+    out.append(make_event(
+        ctx["watch_id"], "probe", "assessment", ctx["t0"],
+        ctx["t1"], freq_hz=freq, emitter=emitter,
+        grade="CONFIRMED",
+        content="probe discrimination on %s: cross-band "
+                "coincidence - %s. Recurrence - solar fold %d "
+                "of %d observations inside one hour (share "
+                "%.2f), sidereal fold %d of %d (share %.2f): %s"
+                % (label, coin_txt,
+                   rec["solar"]["in_window"], rec["solar"]["count"],
+                   rec["solar"]["share"],
+                   rec["sidereal"]["in_window"],
+                   rec["sidereal"]["count"],
+                   rec["sidereal"]["share"], rec["verdict"]),
+        data={"rule": "probe_discrimination",
+              "baseline": "%d observations in the cluster"
+                          % len(times),
+              "recurrence": rec, "coincidence": coin},
+        links=[sid]))
     return out
 
 
@@ -1230,6 +1623,7 @@ PROCESS = {
     "broadcast": process_broadcast,
     "sweep": process_sweep,
     "audiocensus": process_audiocensus,
+    "probe": process_probe,
     "amateur": process_amateur,
     "iss": process_iss,
     "vdl2": process_vdl2,

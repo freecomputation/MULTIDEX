@@ -110,6 +110,10 @@ RULES = {
     "sweep": ("universal",
               "the spectrum census is the system's own baseline "
               "instrument and applies at every home"),
+    "probe": ("universal",
+              "the probe's targets are the home's own unresolved "
+              "record; wherever the station has heard something "
+              "unexplained more than once, a stare can be billed"),
 }
 
 
