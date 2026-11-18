@@ -4,7 +4,7 @@ An autonomous 24-hour signals watch on a single RTL-SDR
 
 Free Computation
 
-Manual for MULTIDEX 0.1.3
+Manual for MULTIDEX 0.8.0
 
 # 01 Introduction
 
@@ -38,9 +38,9 @@ The eighth law is receive only. There is no transmission path in the design, in 
 
 ## What MULTIDEX is not
 
-MULTIDEX is not a live listening tool. It makes no sound during a watch, with one exception: a two-tone chime sounds on the host when a FLASH alert is written, if the profile's alerts section enables it, so an alert is audible in the room as well as filed. Tuning around by ear and listening to a conversation as it happens are a different program's work. MULTIDEX files audio evidence as snippets under bounded quotas and reports what it heard in its products; it does not present a speaker feed.
+MULTIDEX is not a live listening tool. It makes no sound during a watch, with one exception: a two-tone chime sounds on the host when a FLASH alert is written, if the profile's alerts section enables it, so an alert is audible in the room as well as filed. Tuning around by ear and listening to a conversation as it happens are a different program's work. MULTIDEX files audio evidence as snippets under the home's standing allocation pool, accounted in chapter 08, and reports what it heard in its products; it does not present a speaker feed.
 
 It is not a scanner toy. A scanner dwells where it is told and forgets everything by morning. MULTIDEX plans its day in advance as a written bill, accounts for every dwell and every gap, correlates each emitter into a dossier that persists across watches, and renders a flagship report whose coverage account can be audited against the dwell records in the Index.
 
-It is also not a promise machine. Where a decode needs a program this build does not carry, the desk benches itself and states the reason in the doctor output, in the watch's own record and in the products. Chapter 07 states the current release's desk inventory exactly, including its benches, and chapter 13 describes the program that stands those desks up. Nothing in this manual describes a benched desk as if it were standing.
+It is also not a promise machine. Where a decode needs a program this build does not carry, the desk benches itself and states the reason in the doctor output, in the watch's own record and in the products. Chapter 07 states the current release's desk inventory exactly, including its benches, and chapter 13 describes the independence program under which each external program the system still binds is a stated dependence, retired in turn by an implementation of its own. Nothing in this manual describes a benched desk as if it were standing.
 

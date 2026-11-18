@@ -33,7 +33,7 @@ The shipped position is a reference position and must be replaced before a real 
 | sitrep_hours | 6 | SITREP cadence in hours of watch time |
 | deep_sweep_start | 1 | Local hour the nightly deep census sweep window opens |
 | deep_sweep_end | 4 | Local hour it closes |
-| disk_ceiling_gb | 20 | Hard ceiling in GB on everything the watch writes, snippets included |
+| disk_ceiling_gb | 20 | Standing cap in GB on the home's reception pool: every reception every watch files draws against it, as chapter 08 describes |
 
 During the deep sweep window, 01:00 to 04:00 local as shipped, the bill's gap filling is given over to census sweeps of up to 900 seconds: the quietest bands in the quietest hours. Outside it, a census sweep is inserted at least every 45 minutes of filled time.
 
@@ -43,8 +43,9 @@ Each Class B rotation entry has a weight, its share of the filled day, and a dwe
 
 | Entry | Weight | Dwell (s) | Centre | Desks |
 | --- | --- | --- | --- | --- |
-| adsb | 10 | 150 | 1090 MHz | adsb |
-| airband | 9 | 600 | 125.0 MHz | airband |
+| adsb | 16 | 120 | 1090 MHz | adsb |
+| airband | 20 | 120 | cycles 121.3, 118.6, 125.8, 134.3 MHz | airband |
+| milair | 10 | 90 | cycles the milair desk's eight channels | milair |
 | datalink | 6 | 300 | 131.55 MHz | acars |
 | marine | 6 | 300 | 162.3 MHz | ais, wxradio |
 | aprs | 4 | 240 | 144.39 MHz | aprs |
@@ -54,19 +55,19 @@ Each Class B rotation entry has a weight, its share of the filled day, and a dwe
 | cellular | 3 | 240 | 752.5 MHz | cellular |
 | trunking | 3 | 240 | 851.75 MHz | trunking |
 | fmband | 2 | 180 | 98 MHz | broadcast, sweep |
-| hf_day | 4 | 300 | 14.15 MHz | sweep |
-| hf_night | 4 | 300 | 7.1 MHz | sweep |
+| hf_day | 4 | 300 | cycles 12.3, 17.9, 21.9 MHz | sweep, amateur, hfdl |
+| hf_night | 4 | 300 | cycles 10.0, 8.9, 6.6, 5.5 MHz | sweep, amateur, hfdl |
 
-Every rotation dwell captures a 2.4 MHz window at its centre. An entry naming an unknown slot, a negative weight or a non-positive dwell is a hard profile problem. A weight of zero parks the entry without removing it.
+Every rotation dwell captures a 2.4 MHz window at its centre. An entry whose centre cycles steps through its set of centres from dwell to dwell rather than holding one centre, so a short dwell still covers the whole set across the day. An entry naming an unknown slot, a negative weight or a non-positive dwell is a hard profile problem. A weight of zero parks the entry without removing it.
 
 ## desks
 
 | Key | Default | What it changes |
 | --- | --- | --- |
-| stand | the 14-desk list below | Desks that stand the watch |
+| stand | the 21-desk list below | Desks that stand the watch |
 | bench | empty list | Desks to bench even though they could stand |
 
-The shipped stand list is: adsb, airband, acars, ais, wxradio, ism, aprs, pager, sweep, satellite, sonde, cellular, trunking and broadcast. A desk absent from the list is benched with the reason "not in the profile desk roster"; a desk in the bench list is benched with the reason "benched by the watch profile". Neither mechanism can stand a desk the build itself benches: the benched-with-reason desks of chapter 07 bench themselves regardless, and doctor shows all three kinds of bench with their distinct reasons. An unknown desk name in either list is a hard profile problem.
+The shipped stand list is: adsb, airband, milair, audiocensus, acars, ais, wxradio, ism, aprs, pager, satellite, sonde, broadcast, vdl2, amateur, digitalvoice, hfdl, iss, cellular, trunking and sweep. A desk absent from the list is benched with the reason "not in the profile desk roster"; a desk in the bench list is benched with the reason "benched by the watch profile". Neither mechanism can stand a desk the host itself benches: a desk whose bound program is absent from the host benches itself regardless of the roster, and doctor shows all three kinds of bench with their distinct reasons. An unknown desk name in either list is a hard profile problem.
 
 ## alerts
 
@@ -93,18 +94,18 @@ The threshold grade must be CONFIRMED, PROBABLE or UNRESOLVED; anything else is 
 | --- | --- | --- |
 | iq_max_per_watch | 100 | I/Q snippets kept per watch, for unidentified or anomalous emissions, ten seconds at a time |
 | voice_cap_per_desk | 200 | Voice transmissions kept whole, per voice desk, per watch |
-| satellite_keep | true | Satellite imagery is product and is kept whole |
+| satellite_keep | true | Satellite pass evidence is product and is kept whole |
 
-Snippet storage is bounded twice: by these caps per kind and desk, and by the disk ceiling across everything the watch writes. When a cap or the ceiling binds, the store sheds oldest first and files a system event for every shed, so the record of what was kept never silently diverges from what was heard.
+Snippet storage is bounded three ways. The count caps above bind per kind and desk within a watch, and a filing past a cap is refused with the reason filed as an event. Every snippet also draws against its bill item's reception grant, taken at muster from the home's standing allocation pool, and a payload that would cross its grant is refused at filing with the grant named. And the pool binds home-wide: when it binds, the store sheds the oldest filed receptions across all watches, satellite evidence shed last, and files a system event for every shed, so the record of what was kept never silently diverges from what was heard. One class is exempt from shedding altogether: payload evidence, the digital voice desk's vocoder frame archives, is filed even when nothing sheddable remains, and the overage stands in the accounting. Chapter 08 describes the pool and its ledger in full.
 
 ## transcription
 
 | Key | Default | What it changes |
 | --- | --- | --- |
-| desks | ["airband"] | Voice desks whose audio is transcribed in the background |
+| desks | ["airband"] | Desks in scope for transcription; a name here must be a known desk |
 | cap_per_watch | 40 | Transcripts produced per watch, at most |
 
-In the current release no transcription engine is bound, so this section configures a capability the build states as benched: voice audio is filed as snippets and transcripts are reported as not produced, in doctor and in the products. The keys are validated (a desk named here must be a known desk) and carried, so a profile written today means the same thing when an engine is bound. Transcription, when bound, never blocks collection and reports its backlog.
+The transcription engine is the host's faster-whisper stack, and it binds when that stack is importable on the host. Doctor states the state either way: bound, or benched with the reason, in which case voice audio is filed as snippets and transcripts are reported as not produced. The queue takes its candidates from the audio census desk's grade-A events, on the real source only: simulated audio is never transcribed, because a machine transcript of synthetic audio would be a fabrication in the products. A candidate reaches the engine only at grade A with at least 15 dB of signal to noise, and the queue is rationed in the open: at most three jobs an hour, at most twenty waiting, and ninety CPU-minutes of estimated cost per watch, charged at nineteen times each snippet's duration. Every drop is accounted with its reason, at the gate, at the queue or at the budget, and the watch's stand-down files the full accounting, so the products can state how many candidates went untranscribed and why. A transcript is a machine transcript: it inherits the snippet's grade, is labelled unverified in every product, and never upgrades the grade of the emission it came from. Transcription never blocks collection.
 
 ## excluded
 
@@ -122,6 +123,20 @@ Any rotation entry or sweep window overlapping an excluded band is skipped by th
 | synoptic_hours | [0, 12] | UTC synoptic hours the upper-air network launches against |
 
 The shipped sites are a "North site" at 40.2, -98.3 and a "South site" at 37.8, -97.6, placed around the reference position. Balloons rise ahead of the synoptic hours and fly for about two hours. The bill builder turns each site within 700 km of home into Class A sonde windows: four sub-dwells of 600 seconds beginning 45 minutes before each synoptic hour. Replace the sites with your own region's launch sites, or the sonde desk will faithfully watch windows over somebody else's sky.
+
+## updates
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| posture | "notify-only" | How a staged, gate-passed release activates: "automatic" activates at the next safe boundary, "notify-only" waits for the operator's approval through the update verb, "off" stages and reports but never activates |
+| remote | "origin" | Name of the git remote in the running generation's tree that checks fetch release tags from |
+| remote_url | "" | When set, the URL checks fetch from instead of the named remote's configured URL |
+| check_interval_hours | 6 | Hours between remote checks while a watch stands |
+| probation_items | 3 | Bill items a newly activated generation must work cleanly before its probation passes |
+| pass_guard_minutes | 30 | No activation is written inside this many minutes before a Class A satellite pass |
+| freeze_warning_days | 14 | Days without a completed remote check before doctor and status warn that the channel has frozen |
+
+The posture gates activation only, never verification: an unverifiable release is refused identically under every posture, and there is no unsigned activation path in any posture. Chapter 14 is the full account of the update system these keys govern.
 
 ## advanced
 
