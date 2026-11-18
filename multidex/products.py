@@ -111,7 +111,13 @@ def maybe_flash(index, watch_id, ev, profile):
     elif ev["kind"] == "pass" and ev["data"].get("flash"):
         reason = "pass complete"
     elif ev["kind"] == "pass" and ev["desk"] == "satellite" \
-            and ev["grade"] == "CONFIRMED":
+            and ev["grade"] == "CONFIRMED" \
+            and not ev["data"].get("acknowledged"):
+        # An acknowledged pass is graded CONFIRMED but nothing
+        # was captured for it (the METEOR acknowledgement
+        # policy: no recording, no decode, a zero-byte
+        # allocation), so it must never raise a FLASH whose
+        # reason claims a capture.
         reason = "satellite pass captured"
     elif ev["kind"] == "imagery" and ev["data"].get("imagery"):
         reason = "satellite imagery decoded"
