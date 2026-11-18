@@ -726,11 +726,21 @@ def process_sweep(feed, ctx):
             data["snr_db"] = round(em["peak_dbm"] - floor, 1)
             if data["snr_db"] >= 30:
                 data["interrupt_candidate"] = True
-        out.append(make_event(
+        ev = make_event(
             ctx["watch_id"], "sweep", "observation", ctx["t0"], ctx["t1"],
             freq_hz=em["freq_hz"], emitter=label,
             grade="UNRESOLVED" if unknown else "PROBABLE",
-            content=label, data=data))
+            content=label, data=data)
+        for exc in feed.get("excerpts") or []:
+            if exc.get("freq_hz") == em["freq_hz"]:
+                # The source channelized this emission's span of
+                # the scan capture (tier 2, 0.10.0): the excerpt
+                # is the evidence a later classifier reads.
+                _attach_excerpt(ev, exc, ctx,
+                                "sweep-%d" % int(em["freq_hz"]),
+                                em["freq_hz"])
+                break
+        out.append(ev)
     return out
 
 
@@ -747,6 +757,33 @@ def _samples_wav(samples, rate=16000):
         w.setframerate(rate)
         w.writeframes(_struct.pack("<%dh" % len(samples), *samples))
     return buf.getvalue()
+
+
+def _attach_excerpt(ev, exc, ctx, stem_name, freq_hz):
+    """Attach one tier 2 IQ excerpt to an event as a SigMF pair
+    (0.10.0): the pair payloads go in FRONT of any payload the
+    event already carries, so a voice snippet stays the last
+    filed and remains the event's headline snippet - the path
+    transcription reads. The event's data names the excerpt's
+    data file. Synthetic excerpts (the simulated source's) are
+    marked as such in their metadata, as the frame archives
+    are."""
+    from . import sigmf
+    synthetic = (ctx.get("profile") or {}).get(
+        "source", {}).get("kind") != "real"
+    pair = sigmf.pair_payloads_encoded(
+        stem_name, exc["b64"], exc["samples"], exc["rate"],
+        freq_hz, ctx["t0"], peak=exc.get("peak", 1.0),
+        bw_hz=exc.get("bw_hz"), synthetic=synthetic,
+        label="unclassified emission")
+    existing = ev["data"].get("_snippet")
+    if existing is None:
+        ev["data"]["_snippet"] = pair
+    else:
+        if isinstance(existing, dict):
+            existing = [existing]
+        ev["data"]["_snippet"] = pair + existing
+    ev["data"]["iq_excerpt"] = stem_name + ".sigmf-data"
 
 
 def process_audiocensus(feed, ctx):
@@ -815,16 +852,35 @@ def process_audiocensus(feed, ctx):
                     "voice")
                 if grade_letter == "A":
                     ev["data"]["transcribe_candidate"] = True
+            if cand.get("excerpt"):
+                _attach_excerpt(
+                    ev, cand["excerpt"], ctx,
+                    "audiocensus-%d" % int(cand["freq_hz"]),
+                    cand["freq_hz"])
         else:
+            content = ("audio-band energy graded D by the audio "
+                       "census (score %d/100): consistent with "
+                       "noise or a burst, no snippet filed"
+                       % cand.get("score", 0))
+            if cand.get("excerpt"):
+                content = ("audio-band energy graded D by the "
+                           "audio census (score %d/100): "
+                           "consistent with noise or a burst, no "
+                           "audio snippet filed; the emission's "
+                           "modulation is unclassified, so a "
+                           "channel IQ excerpt is filed as a "
+                           "SigMF pair for later classification"
+                           % cand.get("score", 0))
             ev = make_event(
                 ctx["watch_id"], "audiocensus", "observation",
                 ctx["t0"], ctx["t1"], freq_hz=cand["freq_hz"],
                 emitter=emitter, grade="UNRESOLVED",
-                content="audio-band energy graded D by the audio "
-                        "census (score %d/100): consistent with "
-                        "noise or a burst, no snippet filed"
-                        % cand.get("score", 0),
-                data=data)
+                content=content, data=data)
+            if cand.get("excerpt"):
+                _attach_excerpt(
+                    ev, cand["excerpt"], ctx,
+                    "audiocensus-%d" % int(cand["freq_hz"]),
+                    cand["freq_hz"])
         out.append(ev)
     if feed.get("carriers"):
         out.append(make_event(
