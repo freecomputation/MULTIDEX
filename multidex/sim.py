@@ -463,7 +463,27 @@ class SimSource:
                 if "METEOR" in sat["name"]:
                     freq = 137.9e6
                 add(freq, 150e3, -88, "apt", sat["name"])
-        return {"noise_floor_db": round(floor, 1), "emissions": emissions}
+        # The Console's waterfall frame for this window (0.8.0):
+        # the simulated world's own spectrum, its emissions drawn
+        # as gaussian shoulders over its floor - the same model
+        # the census reads, rendered for the glass.
+        bins = []
+        nb = 120
+        for i in range(nb):
+            f = lo + (hi - lo) * (i + 0.5) / nb
+            v = floor + rng.uniform(-0.8, 0.8)
+            for em in emissions:
+                sigma = max(em["bw_hz"] / 2.5, (hi - lo) / nb)
+                bump = (em["peak_dbm"] - floor) * math.exp(
+                    -0.5 * ((f - em["freq_hz"]) / sigma) ** 2)
+                if bump > 0.5:
+                    v = max(v, floor + bump)
+            bins.append(round(v, 1))
+        return {"noise_floor_db": round(floor, 1),
+                "emissions": emissions,
+                "display": {"lo_hz": lo, "hi_hz": hi,
+                            "floor_db": round(floor, 1),
+                            "bins": bins}}
 
     def _airband_active(self, freq_hz, t):
         w = self.world

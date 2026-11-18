@@ -87,6 +87,7 @@ DEFAULTS = {
         "interrupt_cap_per_hour": 3,
         "time_scale": 1.0,
         "tuner_outages": [],
+        "display_feed": True,
     },
 }
 
