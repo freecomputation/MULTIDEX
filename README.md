@@ -140,7 +140,12 @@ from signal energy files as a PROBABLE census; CONFIRMED is
 reserved for an actually decoded SAME header. Mode S position
 pairs are only paired into a global position when the even and odd
 frames arrive within ten seconds of each other, the CPR pairing
-window; older frames expire unpaired.
+window; older frames expire unpaired. The ADS-B capture itself is
+ten seconds at maximum tuner gain: Mode S is a weak-signal pulse
+service, and at the moderate gain the other captures use, a rural
+indoor antenna reads the band at the idle floor - field-checked
+against live traffic, where maximum gain decoded airliners cleanly
+in the same window the moderate gain heard nothing.
 
 Tier 2 is implemented where pure Python honestly carries it and
 benched with the reason where it does not. Satellite pass prediction
