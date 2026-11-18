@@ -297,8 +297,8 @@ class SimWorld:
 # subcarrier. The picture is a horizontal gradient with a white
 # block in the middle rows, so a correct decode is recognizable at
 # a glance. Deterministic: the same duration and rate always
-# produce the same samples, and a real APT decoder (aptdec)
-# decodes them into a 2080-pixel-wide image.
+# produce the same samples, and the package's own APT decoder
+# (multidex.apt) decodes them into a 2080-pixel-wide image.
 
 _APT_WORDS = 4160        # envelope words per second (1 per word)
 _APT_BLACK, _APT_WHITE = 0.13, 0.95

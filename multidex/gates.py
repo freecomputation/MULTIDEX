@@ -190,6 +190,18 @@ def doctor_text(profile, home):
                      "this host; METEOR passes still record and "
                      "file their IQ, and their events state that "
                      "LRPT imagery was not decoded")
+    # The dependence census: every external program this build
+    # invokes, printed from the binding table itself so the
+    # account cannot drift from the code. Each entry is a
+    # dependence until an own implementation retires it.
+    from .toolbind import dependence_census
+    lines.append("Dependences (external programs this build "
+                 "invokes; each is a dependence until an own "
+                 "implementation retires it):")
+    for dep in dependence_census():
+        lines.append("- %s: used by %s - %s - dependence"
+                     % (dep["program"], dep["used_by"],
+                        "present" if dep["present"] else "absent"))
     lines.append("Source capabilities: %s"
                  % (", ".join(sorted(capabilities)) if capabilities
                     else "all desks (simulated source)"))
