@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.2.0.
+Version 0.2.1.
 
 ## The verbs
 
@@ -160,12 +160,19 @@ decoded by this build. Radiosonde windows are scheduled from
 configured sites and synoptic hours; against the real source the
 sonde desk files a presence census of carriers in the sonde band
 and states that telemetry is not decoded, because an RS41-class
-decoder is not bound. Benched with reasons stated in `doctor`:
-VDL2, HFDL, amateur SSB/CW/digital, DMR/P25/NXDN digital voice, and
-ISS voice/SSTV decode - each needs a decoder program outside the
-standard library. Transcription is likewise benched: no engine is
-bound, voice audio is filed as snippets, and products report
-transcripts as not produced rather than inventing them.
+decoder is not bound. The amateur desk decodes CW in pure Python
+and binds FT8 to the host's jt9 when present; the ISS desk decodes
+SSTV in pure Python. Three desks bind decoder programs staged in
+user space on the host - VDL2 to dumpvdl2, digital voice
+signalling to DSD-FME, HFDL to dumphfdl - and stand when the
+program is present, benching with the staging instruction as the
+reason, stated in `doctor`, when it is not. HFDL coverage is
+opportunistic: the rotation's day and night windows carry the
+system-table channel sets, and the fixed antenna is a VHF/UHF
+antenna. Transcription binds the host's faster-whisper stack the
+same conditional way; where no engine is bound, voice audio is
+filed as snippets and products report transcripts as not produced
+rather than inventing them.
 
 Tier 3 desks are metadata-only by design: cellular and trunking
 censuses count systems, bands, and activity and never attempt content.

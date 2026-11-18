@@ -273,6 +273,48 @@ built. The full research record lives with the build.
   desks' capture failures as gaps with the import error stated,
   and the watch stands.
 
+## 19. The 0.2.1 build record
+
+What 0.2.1 stood up, stated as built.
+
+- HFDL stands, bound to the host's dumphfdl program (1.7.0,
+  libacars 2.2.1) staged in user space with its SoapySDR,
+  liquid-dsp and FFTW chain, on the same conditional model as
+  VDL2 and digital voice: present, the desk stands; absent, it
+  benches with the staging instruction as its reason. The
+  production feed drives the SDR through SoapySDR with direct
+  sampling mode 2 at 3.2 Msps and gain 40, decoded JSON out,
+  and passes the system table explicitly, resolved from the
+  program's own staged location - the program does not load
+  it by default. HF reception at the reference site is
+  unproven, not disproven: the proven staging run heard no
+  frames in its window, and the products say the desk's
+  coverage is opportunistic, because the fixed antenna is a
+  VHF/UHF antenna.
+- The HFDL rotation is propagation-driven. Day windows (a
+  12.3 MHz centre spanning the 11.3 and 13.3 MHz station
+  clusters, plus 17.9 and 21.9 MHz) carry the day channel set;
+  night windows (10.0, 8.9, 6.6, 5.5 MHz) carry the night set.
+  Both sets are transcribed from the dumphfdl system table
+  (version 52), anchored on the United States stations with
+  neighbouring stations' channels that fall in the same
+  windows carried with them; every channel falls inside its
+  window's span and inside the decoder's capture span. The
+  table's 2.9-3.9 MHz channels and its 15025 kHz channel fall
+  outside every window and are not carried.
+- The VDL2 production invocation is repaired. The 0.2.0 form
+  passed dumpvdl2 an option the 2.7.0 program does not have
+  and an output specifier its grammar rejects; the tool
+  failure was swallowed and the desk would have decoded
+  nothing on live dwells while appearing to run. The
+  invocation now uses the program's verified form, and its
+  output parsing reads the ACARS block where the program's
+  JSON actually nests it, under the AVLC frame.
+- With HFDL stood, no desk benches by design text. Every
+  remaining bench is a host fact (a decoder program or an
+  engine not staged), a profile choice, or a muster condition,
+  each stated in its own words on every surface.
+
 License: AGPL-3.0, the Free Computation standard.
 
 Repo: https://github.com/freecomputation/MULTIDEX

@@ -35,6 +35,36 @@ AIRBAND_CHANNELS = [118.075e6, 121.100e6, 121.500e6, 125.400e6,
 MILAIR_CHANNELS = [239.275e6, 243.000e6, 248.550e6, 270.350e6,
                    319.250e6, 327.125e6, 336.300e6, 371.350e6]
 
+# HFDL channels, in Hz: transcribed from the dumphfdl system
+# table, version 52 (etc/systable.conf in the dumphfdl 1.7.0
+# source; 16 ground stations, frequencies in kHz there). The day
+# set is every table channel at 11 MHz and above that falls
+# inside a day rotation window; the night set is every table
+# channel below 11 MHz inside a night window (officer.ROTATION).
+# The table's 2.9-3.9 MHz channels and its 15025 kHz channel fall
+# outside every window and are not carried. Windows were chosen
+# around the United States stations (Riverhead, San Francisco,
+# Molokai, Barrow); neighbouring stations' channels that fall in
+# the same windows are carried with them.
+HFDL_DAY_CHANNELS = [
+    11184000, 11306000, 11312000, 11318000, 11321000, 11327000, 11348000,
+    11354000, 11384000, 11387000, 13264000, 13270000, 13276000, 13303000,
+    13312000, 13315000, 13321000, 13324000, 13342000, 13351000, 17901000,
+    17912000, 17916000, 17919000, 17922000, 17928000, 17934000, 17958000,
+    17967000, 17985000, 21928000, 21931000, 21934000, 21937000, 21949000,
+    21955000, 21982000, 21990000, 21997000,
+]
+HFDL_NIGHT_CHANNELS = [
+    4654000, 4660000, 4681000, 4687000, 5451000, 5502000, 5508000,
+    5514000, 5529000, 5538000, 5544000, 5547000, 5583000, 5589000,
+    5622000, 5652000, 5655000, 5720000, 6529000, 6532000, 6535000,
+    6559000, 6565000, 6589000, 6596000, 6619000, 6628000, 6646000,
+    6652000, 6661000, 6712000, 8825000, 8834000, 8843000, 8885000,
+    8886000, 8894000, 8912000, 8921000, 8927000, 8936000, 8939000,
+    8942000, 8948000, 8957000, 8977000, 10027000, 10030000, 10060000,
+    10063000, 10066000, 10081000, 10084000, 10087000, 10093000,
+]
+
 # name -> (tier, service, cpu class, channels [(freq, bw)] or "window")
 SPECS = {
     "adsb":      (1, "ADS-B aircraft", "light",
@@ -68,19 +98,11 @@ SPECS = {
 }
 
 # Desks this build benches with the reason stated, whatever the
-# profile says. In 0.2.0 only HFDL remains here; the desks that
-# were benched in 0.1.x stand now, in person or through a bound
-# host tool (see CONDITIONAL_BENCHED and toolbind).
-ALWAYS_BENCHED = {
-    "hfdl": "HFDL decode stays benched in this build: the decoder "
-            "(dumphfdl) needs a SoapySDR, liquid-dsp, FFTW and "
-            "libacars chain with no user-space staging route on "
-            "this host; its channels span 3-22 MHz and need a "
-            "propagation-driven band rotation this build does not "
-            "carry; and the fixed antenna is a VHF/UHF antenna. HF "
-            "spectrum is censused by the sweep and audio census "
-            "desks on every HF dwell, and no HFDL decode is claimed",
-}
+# profile says. Empty in this build: every desk stands in person
+# or through a bound host tool (see CONDITIONAL_BENCHED and
+# toolbind). Kept as the first check in desk_state so a future
+# design bench lands in exactly one place.
+ALWAYS_BENCHED = {}
 
 # Desks that stand on the real source when a host decoder program
 # is present and bench with the staging instruction when it is
@@ -912,6 +934,60 @@ def process_digitalvoice(feed, ctx):
     return out
 
 
+# ------------------------------------------------------------------ HFDL
+
+def _hfdl_party(party):
+    """Render one src/dst object from a dumphfdl frame: ground
+    stations carry a numeric id and, when the system table was
+    loaded, a name; aircraft carry a numeric id and, when the
+    program's cache knows it, an ac_info block with the ICAO
+    address. Anything absent renders as absent."""
+    if not isinstance(party, dict):
+        return "unknown party", None
+    kind = party.get("type") or "party"
+    pid = party.get("id")
+    label = "%s %s" % (kind, pid if pid is not None else "?")
+    if party.get("name"):
+        label += " (%s)" % party["name"]
+    icao = None
+    info = party.get("ac_info")
+    if isinstance(info, dict):
+        icao = info.get("icao") or info.get("icao_address")
+    return label, icao
+
+
+def process_hfdl(feed, ctx):
+    """HFDL frames decoded by the bound dumphfdl program. One
+    event per decoded frame: squitters and logon traffic are
+    network signalling, data PDUs are the datalink itself. The
+    desk reports what the program decoded - frame kind, parties,
+    channel - and nothing it did not."""
+    out = []
+    for msg in feed.get("messages", []):
+        pdu = msg.get("pdu") or "frame"
+        src_label, src_icao = _hfdl_party(msg.get("src"))
+        dst_label, dst_icao = _hfdl_party(msg.get("dst"))
+        # Logon-class LPDUs carry the aircraft address at the
+        # PDU level (ac_info), not inside a party object.
+        _lvl, lvl_icao = _hfdl_party(
+            {"type": "Aircraft", "ac_info": msg.get("ac_info")})
+        icao = src_icao or dst_icao or lvl_icao
+        detail = msg.get("type_name") or pdu.upper()
+        out.append(make_event(
+            ctx["watch_id"], "hfdl", "decode", ctx["t0"], ctx["t1"],
+            freq_hz=msg.get("freq_hz") or ctx.get("freq_hz"),
+            emitter=icao, grade="CONFIRMED",
+            content="HFDL %s decoded by the bound dumphfdl "
+                    "program: %s to %s"
+                    % (detail, src_label, dst_label),
+            data={"emitter_kind": "aircraft" if icao else "station",
+                  "pdu": pdu, "src": msg.get("src"),
+                  "dst": msg.get("dst"),
+                  "type_name": msg.get("type_name"),
+                  "raw": msg.get("raw")}))
+    return out
+
+
 PROCESS = {
     "adsb": process_adsb,
     "airband": process_airband,
@@ -933,4 +1009,5 @@ PROCESS = {
     "iss": process_iss,
     "vdl2": process_vdl2,
     "digitalvoice": process_digitalvoice,
+    "hfdl": process_hfdl,
 }
