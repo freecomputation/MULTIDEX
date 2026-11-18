@@ -63,7 +63,7 @@ import tempfile
 import time
 import wave
 
-from . import codecs, modes
+from . import codecs, displayfeed, modes
 
 
 class TunerLost(Exception):
@@ -867,7 +867,18 @@ class RealSource:
                     "peak_dbm": round(p - 60, 1), "shape": "unknown",
                     "label": None})
         result = {"noise_floor_db": round(floor - 60, 1),
-                  "emissions": emissions}
+                  "emissions": emissions,
+                  # The Console's waterfall frame for this window
+                  # (0.8.0): the same power array the peak search
+                  # just read, max-pooled to the display feed's
+                  # bin bound. No second capture, no second FFT.
+                  "display": {
+                      "lo_hz": center_hz - rate / 2,
+                      "hi_hz": center_hz + rate / 2,
+                      "floor_db": round(floor - 60, 1),
+                      "bins": [round(v, 1) for v in
+                               displayfeed.pool_bins(
+                                   [p - 60 for p in power])]}}
         self._scan_cache[key] = result
         return result
 

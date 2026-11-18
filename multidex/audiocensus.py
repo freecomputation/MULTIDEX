@@ -343,6 +343,34 @@ def grade_audio(audio, rate, snr_db, klass, duty):
     return letter, score_i, parts
 
 
+# ------------------------------------------------- display spectrum
+
+DISPLAY_BINS = 240
+
+
+def _display_spectrum(core_f, core_p, center_hz, noise_db):
+    """The window's magnitude spectrum for the Console's
+    waterfall (0.8.0), from the PSD this analysis already
+    computed: max-pooled to at most DISPLAY_BINS bins over the
+    analysed core span, so a narrow carrier survives the
+    reduction. No new samples, no new transform - a projection
+    of work already done, published by the officer into the
+    display feed."""
+    n = len(core_p)
+    if n == 0:
+        return None
+    if n > DISPLAY_BINS:
+        edges = np.linspace(0, n, DISPLAY_BINS + 1).astype(int)
+        bins = [float(core_p[edges[i]:edges[i + 1]].max())
+                for i in range(DISPLAY_BINS)]
+    else:
+        bins = [float(v) for v in core_p]
+    return {"lo_hz": float(center_hz + core_f[0]),
+            "hi_hz": float(center_hz + core_f[-1]),
+            "floor_db": round(float(noise_db), 1),
+            "bins": [round(b, 1) for b in bins]}
+
+
 # ------------------------------------------------------------- main
 
 def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
@@ -356,7 +384,7 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
     iq = np.asarray(iq)
     if len(iq) < 4096:
         return {"candidates": [], "carriers": 0, "over_cap": 0,
-                "noise_floor_db": None}
+                "noise_floor_db": None, "display": None}
     nperseg = 16384 if fs >= 2e6 else 4096
     freqs, psd = _welch_db(iq, fs, nperseg)
     n = len(freqs)
@@ -367,6 +395,7 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
     core_p = core_p.copy()
     core_p[dc] = -300.0
     noise_db = float(np.median(core_p[core_p > -299]))
+    display = _display_spectrum(core_f, core_p, center_hz, noise_db)
     runs, bin_hz = _segments(core_f, core_p, noise_db)
     found = []
     carriers = 0
@@ -433,4 +462,5 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
         candidates.append(entry)
     return {"candidates": candidates, "carriers": carriers,
             "over_cap": over_cap,
-            "noise_floor_db": round(noise_db, 1)}
+            "noise_floor_db": round(noise_db, 1),
+            "display": display}

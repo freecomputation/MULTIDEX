@@ -17,7 +17,8 @@ import subprocess
 import threading
 import time
 
-from . import budget, gates, orbit, products, updater, util
+from . import budget, displayfeed, gates, orbit, products, updater, \
+    util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -283,6 +284,10 @@ class WatchRunner:
         self._handover_info = None
         self._probation = None
         self._keeperless_notice_for = None
+        # The display feed the Console reads (0.8.0), opened when
+        # the watch folder is known. Publishing is best-effort
+        # and outside the watch's record; see displayfeed.py.
+        self.display = None
 
     # ------------------------------------------------------------ helpers
     def _resolve_source(self, watch_start):
@@ -396,6 +401,26 @@ class WatchRunner:
     def _stop_requested(self):
         return os.path.exists(os.path.join(self.watch_dir, "stop.flag"))
 
+    def _open_display_feed(self):
+        """Open the display feed for this watch folder (0.8.0).
+
+        The profile's advanced display_feed key governs it, on
+        unless the profile turns it off. The feed is a projection
+        for the Console, never part of the record: a watch with
+        the feed off files an identical event record, and a
+        failure to open the feed is swallowed here for the same
+        reason every publish in displayfeed is best-effort."""
+        try:
+            enabled = bool(self.profile["advanced"].get(
+                "display_feed", True))
+        except Exception:
+            enabled = True
+        try:
+            self.display = displayfeed.DisplayFeed(self.watch_dir,
+                                                   enabled=enabled)
+        except Exception:
+            self.display = None
+
     def _file(self, ev):
         # FLASH first: the chime outcome is recorded in the event's
         # own data, so the event must not be persisted before
@@ -405,6 +430,12 @@ class WatchRunner:
         if name:
             self.flash_count += 1
         self.index.add_event(ev)
+        if self.display is not None:
+            # The mind stream: the officer's own filed record,
+            # mirrored to the display feed at filing time.
+            self.display.thought(ev.get("t_start"), ev.get("desk"),
+                                 ev.get("kind"), ev.get("content"),
+                                 flash=bool(name))
         return ev
 
     def _pace(self, seconds):
@@ -477,6 +508,7 @@ class WatchRunner:
         self.watch_id = watch_id
         self.watch_dir = self.index.watch_dir(watch_id)
         self.supervisor.set_watch_dir(self.watch_dir)
+        self._open_display_feed()
         self.exploit = Exploit(self.index, profile)
         self._start_transcription()
         bill = build_bill(profile, start, sats)
@@ -660,6 +692,7 @@ class WatchRunner:
         self.watch_id = watch_id
         self.watch_dir = self.index.watch_dir(watch_id)
         self.supervisor.set_watch_dir(self.watch_dir)
+        self._open_display_feed()
         self.meta = meta
         self.exploit = Exploit(self.index, profile)
         bill = util.read_json(os.path.join(self.watch_dir, "bill.json"),
@@ -1070,6 +1103,7 @@ class WatchRunner:
                 data={"bill_id": item["id"], "cause": "capture failure"}))
             feeds = None
         pre_counts = {}
+        work_lines = {}
         if feeds is not None:
             for desk_name, problem in \
                     self.tuner.capture_errors().items():
@@ -1134,6 +1168,10 @@ class WatchRunner:
                         self._submit_transcription(ev)
                         new_events.append(ev)
                     heard[name] = len(events)
+                    if events:
+                        work_lines[name] = [
+                            ev.get("content") or ""
+                            for ev in events]
                 except Exception as exc:
                     self._file(make_event(
                         self.watch_id, "officer", "gap", t0, t1,
@@ -1164,6 +1202,16 @@ class WatchRunner:
                     self.flash_count += 1
             for ev in new_events:
                 self.index.add_event(ev)
+            if self.display is not None:
+                # The Console's feed for this capture (0.8.0):
+                # each desk's own output lines, then the capture's
+                # spectrum frame with the brackets this batch
+                # declared. Best-effort, outside the record.
+                for desk_name, lines in work_lines.items():
+                    for line in lines[-4:]:
+                        self.display.work(t1, desk_name, line)
+                self._publish_display_frame(item, feeds, new_events,
+                                            t1)
         self.index.add_event(make_event(
             self.watch_id, "officer", "dwell", t0, t1,
             freq_hz=item["center_hz"], grade="CONFIRMED",
@@ -1181,6 +1229,44 @@ class WatchRunner:
                                        pre_counts=pre_counts):
             self._file(ev)
         self._maybe_interrupt(item, new_events, watch_start)
+
+    def _publish_display_frame(self, item, feeds, events, t1):
+        """One capture's spectrum frame for the Console (0.8.0).
+
+        The spectrum is whichever display projection the capture
+        already produced: the sweep scan's own power array on a
+        sweep item, otherwise the audio census slice's PSD, which
+        rides every captured window. A capture that produced
+        neither - a satellite pass, whose feed is audio - publishes
+        no frame, and the waterfall holds the last true frame with
+        its age advancing, which is the design's stated behaviour
+        between captures. Brackets are this batch's own events
+        whose frequencies fall inside the frame's span: the desks
+        declared them by filing them."""
+        disp = None
+        if item["kind"] == "sweep":
+            disp = (feeds.get("sweep") or {}).get("display")
+        if disp is None:
+            disp = (feeds.get("audiocensus") or {}).get("display")
+        if not disp:
+            return
+        lo_hz, hi_hz = disp["lo_hz"], disp["hi_hz"]
+        bin_hz = (hi_hz - lo_hz) / max(1, len(disp["bins"]))
+        brackets = []
+        for ev in events:
+            freq = ev.get("freq_hz")
+            if freq is None or not lo_hz <= freq <= hi_hz:
+                continue
+            bw = (ev.get("data") or {}).get("bw_hz") or bin_hz
+            brackets.append({
+                "desk": ev.get("desk"), "name": ev.get("emitter"),
+                "grade": ev.get("grade"), "freq_hz": freq,
+                "lo_hz": freq - bw / 2.0, "hi_hz": freq + bw / 2.0})
+        self.display.spectrum({
+            "t": t1, "bill_id": item["id"], "label": item["label"],
+            "kind": item["kind"], "lo_hz": lo_hz, "hi_hz": hi_hz,
+            "floor_db": disp.get("floor_db"), "bins": disp["bins"],
+            "brackets": brackets})
 
     def _adopt_snippet(self, ev, desk, bill_id):
         payload = ev["data"].pop("_snippet", None)

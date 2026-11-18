@@ -316,8 +316,8 @@ def test_watch_tty_hands_terminal_to_dashboard(home, profile,
     monkeypatch.setattr(cli, "load_profile", lambda path: prof)
     calls = []
 
-    def fake_attach(h, wid):
-        calls.append((h, wid))
+    def fake_attach(h, wid, keep_awake=False):
+        calls.append((h, wid, keep_awake))
         return True, None
 
     monkeypatch.setattr(liveview, "attach", fake_attach)
@@ -328,6 +328,7 @@ def test_watch_tty_hands_terminal_to_dashboard(home, profile,
     assert len(calls) == 1
     assert calls[0][0] == home
     assert calls[0][1].startswith("watch-")
+    assert calls[0][2] is False  # no --keep-awake on this invocation
     text = out.getvalue()
     assert "View closed. Watch %s keeps running" % calls[0][1] in text
     assert "multidex status --live" in text

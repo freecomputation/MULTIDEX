@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.7.0.
+Version 0.8.0.
 
 ## The verbs
 
@@ -25,7 +25,7 @@ anything it cannot get is a refusal with the reason in plain words.
 - `multidex watch` - muster, then stand the 24-hour watch.
   `multidex watch --resume <watch-id>` resumes an interrupted watch
   from its on-disk state. On an interactive terminal the watch
-  hands the screen to the live dashboard (see `status --live`)
+  hands the screen to the Console (see `status --live`)
   once it stands; quitting the view leaves the watch running in
   the terminal, and the completion line prints when the watch
   stands down. Off a terminal, the watch runs as it always has,
@@ -38,15 +38,17 @@ anything it cannot get is a refusal with the reason in plain words.
   its state file records is still alive; a watch whose officer is
   gone is reported as not running and named as interrupted, and a
   watch folder with no state file is never reported as running.
-  `multidex status --live` attaches a full-screen live dashboard
-  to the current watch: the tuner's current dwell and what comes
-  next, the event feed as it files with FLASH items marked, desk
-  states with bench reasons, band activity, and the coverage
-  totals, refreshed about once a second from the watch's recorded
-  state. The view is read-only and quitting it (q or Ctrl-C) never
-  affects the watch; a completed watch renders its final account,
-  marked complete. Without an interactive terminal or curses, it
-  prints the reason and the plain five-line status instead.
+  `multidex status --live` attaches the Console to the current
+  watch: a full-screen live frame holding the spectrum waterfall,
+  the pipeline of tuner, channelizer and desks with their work
+  streaming inside them, the sky panel, the standing pool, the
+  event feed and the officer's mind stream, refreshed about once
+  a second from the watch's recorded state and the display feed
+  it publishes (see The console, below). The view is read-only
+  and quitting it (q or Ctrl-C) never affects the watch; a
+  completed watch renders its final account, marked complete.
+  Without an interactive terminal or curses, it prints the reason
+  and the plain five-line status instead.
 - `multidex sitrep` - render a SITREP for the running (or latest)
   watch now.
 - `multidex stop` - stand the watch down at the next dwell boundary;
@@ -445,6 +447,57 @@ reopens reliably across officer restarts, because the handover
 depends on that reopening and the system cannot certify it from
 inside.
 
+## The console
+
+The Console (0.8.0) is the system's terminal graphical face:
+one fixed full-screen frame, redrawn in place about once a
+second, that never scrolls. Its panels stand in a fixed
+priority order - header, waterfall, pipeline, sky panel, pool,
+event feed, mind stream - allotted from the live terminal size
+on every refresh, each clipping hard to its allotment, yielding
+in reverse priority order when space runs short, and withdrawn
+to the compact status rendering below an honest minimum size.
+
+The waterfall renders each capture's magnitude spectrum as it
+arrives, newest at the top, history dripping down and cooling,
+with lock brackets named in place where the desks' filings fall
+inside the span. It shows captures, never a fiction of
+continuity: between captures it holds the last true frame with
+its age stated, and a frame older than ninety seconds reads
+HELD. The pipeline shows the tuner, the channelizer and every
+desk as blocks carrying their state and their real output as it
+files; a benched desk shows its bench reason, and an interrupt
+names the item it displaced. The mind stream is the officer's
+own filed record rendered as it files: muster verdicts, grants
+and refusals, benchings, FLASH raisings, update handovers. The
+pool block draws the standing allocation ledger as a reservoir
+with this watch's slice marked. The sky panel stands in the
+frame with an honest benched statement until the astronomical
+patch brings its data.
+
+The officer publishes a bounded display feed for the Console
+inside the watch folder: one spectrum frame per capture
+(computed from samples the watch already took - the audio
+census desk's Welch spectrum or the sweep scan's power array,
+max-pooled to at most 240 bins), per-desk work lines, and the
+officer's thought lines, each ring capped so the whole feed
+stays well under a megabyte. The feed is not part of the
+watch's record, publishing is best-effort and can never reach
+the watch, and the profile's advanced `display_feed` key can
+turn it off, in which case the watch files an identical event
+record and the Console renders from state and Index alone. The
+Console itself is a pure viewer: it writes nothing to the
+watch, and quitting, resizing or killing it leaves the watch
+exactly as it was.
+
+With `--keep-awake` (on `status --live` or `watch`) the
+Console holds the display awake while it runs and releases the
+hold on exit. There is no terminal-layer mechanism for this,
+so the hold is the host's inhibitor program - systemd-inhibit
+or caffeinate - held as a child process; both stand in the
+dependence census the doctor prints, and where neither exists
+the header states plainly that the screen is not held.
+
 ## Testing
 
 `python3 -m pytest` runs the suite: Mode S decoding against known
@@ -459,7 +512,11 @@ bad signatures, moved tags, non-fast-forward candidates,
 counter rollback, hostile diffs, both activation gates, the
 format-raise block, officer handovers at and beside pass items,
 pointer corruption recovery, and a keeper end-to-end probation
-rollback. The real source is covered by unit
+rollback. The Console is covered headlessly: recorded display
+feeds are replayed through the frame builder at fixed terminal
+sizes and the rendered frames asserted against the feed's
+ground truth, and a simulated watch proves the display feed
+changes nothing in the watch's event record. The real source is covered by unit
 tests for its Mode S and AIS demodulators, by feed tests running
 against shim receiver tools, and by a shimmed-real integration
 test: fake `rtl_sdr`, `rtl_fm`, `rtl_power`, `rtl_433`, and

@@ -64,6 +64,55 @@ def _flash_ids(watch_dir):
     return ids, len(files)
 
 
+def _update_posture(home, watch_id):
+    """The live update system's posture for the Console's header
+    (0.8.0): the current generation and its standing, plus this
+    watch's probation progress when a probation record names it.
+    Read from the pointer the keeper maintains; a home without a
+    generation layout has no pointer and reads as None, and a
+    pointer that cannot be verified is the update verb's problem,
+    not the view's - it also reads as None here."""
+    try:
+        from . import updater
+        pointer = updater.load_pointer(home)
+    except Exception:
+        return None
+    if not pointer:
+        return None
+    current = pointer.get("current") or {}
+    posture = {"generation": current.get("hash"),
+               "status": current.get("status")}
+    prob = util.read_json(os.path.join(home,
+                                       updater.PROBATION_FILENAME),
+                          default=None)
+    if prob and prob.get("watch_id") == watch_id:
+        posture["probation"] = {
+            "done": prob.get("done"), "required": prob.get("required"),
+            "status": prob.get("status")}
+    return posture
+
+
+def _pool_view(budget):
+    """The standing pool as the Console's reservoir reads it
+    (0.8.0), from the pool block the officer's state file already
+    carries. The never-granted margin is what the cap holds back
+    after consumption, reservation and free room are accounted,
+    by the ledger's own definition of free."""
+    if not budget or budget.get("cap_bytes") is None:
+        return None
+    cap = budget["cap_bytes"]
+    consumed = budget.get("consumed_bytes") or 0
+    reserved = budget.get("reserved_bytes") or 0
+    free = budget.get("free_bytes")
+    if free is None:
+        free = cap - consumed - reserved
+    return {"cap_bytes": cap, "consumed_bytes": consumed,
+            "reserved_bytes": reserved, "free_bytes": free,
+            "margin_bytes": cap - consumed - reserved - free,
+            "watch_granted_bytes": budget.get("watch_granted_bytes"),
+            "watch_consumed_bytes": budget.get("watch_consumed_bytes")}
+
+
 def collect(home, watch_id, feed_limit=60, band_limit=1000):
     """One raw snapshot of a watch, or None when the watch has no
     state file (no officer has ever reported for it)."""
@@ -119,6 +168,8 @@ def collect(home, watch_id, feed_limit=60, band_limit=1000):
             "bench_reasons": bench_reasons,
             "flash_ids": flash_ids,
             "flash_count": flash_count,
+            "pool": state.get("budget"),
+            "update": _update_posture(home, watch_id),
         }
     finally:
         index.close()
@@ -228,6 +279,19 @@ def build_view(raw, now=None):
             next_a = _item_view(item, watch_now)
             break
 
+    # An interrupt flies inside the window of the item it
+    # displaced; the Console's pipeline panel names the displaced
+    # item, derived here from the bill itself.
+    displaced = None
+    if current and current["kind"] == "interrupt":
+        for item in bill:
+            if item.get("id") == current["id"]:
+                continue
+            if item.get("start", 0) <= current["start"] < \
+                    item.get("start", 0) + item.get("dur", 0):
+                displaced = item.get("label")
+                break
+
     benched = set(state.get("benched") or [])
     active = set()
     if current:
@@ -317,6 +381,9 @@ def build_view(raw, now=None):
         "bands": bands,
         "bands_note": None if bands else
         "no sweep or census detections yet this watch",
+        "pool": _pool_view(raw.get("pool")),
+        "update": raw.get("update"),
+        "displaced_label": displaced,
     }
 
 

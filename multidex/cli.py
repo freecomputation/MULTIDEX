@@ -85,7 +85,9 @@ def _cmd_watch_tty(args, home, profile):
             break
         time.sleep(0.05)
     if watch_id and thread.is_alive():
-        ran, reason = liveview.attach(home, watch_id)
+        ran, reason = liveview.attach(
+            home, watch_id,
+            keep_awake=getattr(args, "keep_awake", False))
         if ran:
             print("View closed. Watch %s keeps running in this "
                   "terminal." % watch_id)
@@ -165,7 +167,8 @@ def cmd_status(args):
     home = _home(args)
     if getattr(args, "live", False):
         from . import liveview
-        return liveview.run_live(home)
+        return liveview.run_live(
+            home, keep_awake=getattr(args, "keep_awake", False))
     print(products.status_text(home))
     from . import updater
     # The update account rides the plain status only where a
@@ -302,14 +305,20 @@ def main(argv=None):
     p_watch = sub.add_parser("watch", help="stand the 24-hour watch")
     p_watch.add_argument("--resume", default=None,
                          help="resume an interrupted watch by id")
+    p_watch.add_argument("--keep-awake", action="store_true",
+                         help="hold the display awake while the "
+                              "console is on the terminal")
     p_watch.set_defaults(fn=cmd_watch)
     sub.add_parser("plan", help="print the watch bill").set_defaults(
         fn=cmd_plan)
     p_status = sub.add_parser("status", help="state of the running "
                                              "watch")
     p_status.add_argument("--live", action="store_true",
-                          help="attach the live terminal dashboard "
-                               "to the current watch")
+                          help="attach the live console to the "
+                               "current watch")
+    p_status.add_argument("--keep-awake", action="store_true",
+                          help="with --live, hold the display "
+                               "awake while the console runs")
     p_status.set_defaults(fn=cmd_status)
     sub.add_parser("sitrep", help="render a SITREP now").set_defaults(
         fn=cmd_sitrep)

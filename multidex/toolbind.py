@@ -111,6 +111,10 @@ DEPENDENCES = (
      "the FLASH chime"),
     ("aplay", "aplay", "path",
      "the FLASH chime"),
+    ("systemd-inhibit", "systemd-inhibit", "path",
+     "the console keep-awake hold"),
+    ("caffeinate", "caffeinate", "path",
+     "the console keep-awake hold"),
 )
 
 
