@@ -49,7 +49,7 @@ From any other terminal, the status verb reads the running watch's own published
 ./bin/multidex status
 ```
 
-Status reports the watch id, elapsed and remaining time, what the officer is doing now, counts of events, dossiers and FLASH alerts, the benched desks if any, and the source flown, with the source note printed where the source was substituted. Status never guesses: a watch whose officer process is gone is reported as not running and named as interrupted, and a folder with no state file is never reported as running. Chapter 10 covers the interrupted case and the resume verb that answers it.
+Status reports the watch id, elapsed and remaining time, what the officer is doing now, counts of events, dossiers and FLASH alerts, the benched desks if any, and the source flown, with the source note printed where the source was substituted. It also states the reception pool: the standing cap, what the pool has consumed and holds reserved in open grants, what is free, and how much of it this watch itself holds. When no watch stands, status still states the pool once the home's ledger knows its cap, because the pool is a property of the home and not of a run. Status never guesses: a watch whose officer process is gone is reported as not running and named as interrupted, and a folder with no state file is never reported as running. Chapter 10 covers the interrupted case and the resume verb that answers it.
 
 ## Stop it early, and what a stand-down produces
 
@@ -59,5 +59,5 @@ Status reports the watch id, elapsed and remaining time, what the officer is doi
 
 The stop verb writes a stop flag into the running watch's folder. The officer sees it at the next dwell boundary, stands the watch down early, and renders its Watch Report for the elapsed portion, marked as ended early with the reason "operator stop". Stop is therefore not an abort that discards the day: four hours of a stopped watch produce the full product set for four hours, with a coverage account that covers exactly the elapsed span and says why it ends there. If no officer process is alive, stop writes nothing and says so; a dead watch cannot be stood down, only resumed or left as its record stands.
 
-A completed or stood-down watch folder holds the bill, the watch metadata, the state file, the event log, the rendered Watch Report, any SITREPs and FLASH files, the filed snippets, and one stderr log per desk worker. Chapter 08 describes each product. The Index keeps the watch's events and dossiers after the folder's products are rendered, so the watch remains queryable with the ask verb for as long as the home is kept.
+A completed or stood-down watch folder holds the bill, the watch metadata, the state file, the budget snapshot of the grants the watch took at muster, the event log, the rendered Watch Report, any SITREPs and FLASH files, the filed snippets, and one stderr log per desk worker. Chapter 08 describes each product. The Index keeps the watch's events and dossiers after the folder's products are rendered, so the watch remains queryable with the ask verb for as long as the home is kept.
 

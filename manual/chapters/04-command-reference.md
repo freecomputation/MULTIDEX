@@ -1,6 +1,6 @@
 # 04 Command reference
 
-The command surface is seven verbs and nothing else. No verb asks a question back. Anything a verb needs comes from the profile, the defaults or its arguments, and anything it cannot get is a refusal with the reason. Global options come before the verb: --home names the data home, resolved as --home first, then the MULTIDEX_HOME environment variable, then ~/.multidex; --profile names the profile, resolved as a path when the name is an existing file, then as a name in the home's profiles folder, then in the repository tree's profiles folder. The special profile name "default" with no file present loads the built-in defaults, which carry the same values as the shipped default.toml.
+The command surface is eight verbs and nothing else. No verb asks a question back. Anything a verb needs comes from the profile, the defaults or its arguments, and anything it cannot get is a refusal with the reason. Global options come before the verb: --home names the data home, resolved as --home first, then the MULTIDEX_HOME environment variable, then ~/.multidex; --profile names the profile, resolved as a path when the name is an existing file, then as a name in the home's profiles folder, then in the repository tree's profiles folder. The special profile name "default" with no file present loads the built-in defaults, which carry the same values as the shipped default.toml.
 
 | Verb | Purpose |
 | --- | --- |
@@ -11,6 +11,7 @@ The command surface is seven verbs and nothing else. No verb asks a question bac
 | stop | Stand the running watch down at the next dwell boundary |
 | ask | Query the Index |
 | doctor | Muster checks and desk inventory without standing a watch |
+| update | Live updates: check, status, approve, reset, rollback |
 
 ## watch
 
@@ -20,7 +21,7 @@ The watch verb loads the profile, resolves the source and runs the muster gates.
 
 A start that finds another watch's officer alive in the same home is refused, with the running watch and its officer process named in the refusal. One home stands one watch at a time, and one tuner serves one watch.
 
-With --resume, the verb takes the id of an interrupted watch. Resume re-runs the muster gates against the current footing, re-files the bench set, and continues the original bill from the first dwell that never filed its dwell record; recorded dwells are never re-flown, and FLASH numbering continues from the files on disk. A watch whose officer is still alive is not interrupted and cannot be resumed, and neither can a completed watch; the refusal says so. Chapter 06 describes the mechanics in full.
+With --resume, the verb takes the id of an interrupted watch. Resume re-runs the muster gates against the current footing, re-files the bench set, reconciles the watch's reception grants against the standing ledger, its bill and the snippet store, and continues the original bill from the first dwell that never filed its dwell record; recorded dwells are never re-flown, and FLASH numbering continues from the files on disk. A watch whose officer is still alive is not interrupted and cannot be resumed, and neither can a completed watch; the refusal says so. Chapter 06 describes the mechanics in full.
 
 On normal completion or stand-down, the verb prints the watch id and the path of the watch folder holding the products, and exits with code 0.
 
@@ -32,9 +33,9 @@ Plan loads the orbital elements, builds the bill for a watch starting now, and p
 
 ## status
 
-Usage: `multidex [--home DIR] status`
+Usage: `multidex [--home DIR] status [--live] [--keep-awake]`
 
-Status reads the home's current watch pointer, validates it against the disk, and prints the running watch's published state: watch id, elapsed and remaining time, current activity, counts of events, dossiers and FLASH alerts, the benched desks or the statement that all standing desks are healthy, and the source kind. A watch on a substituted source carries its source note. When no watch is running, status says so in terms that match the disk: the last completed watch is named when the pointer names one, an interrupted watch is named as interrupted with the resume invocation given, and a folder with no state file is reported as a watch no officer is reporting for. Status exits with code 0 in all these cases; it is a report, not a gate.
+Status reads the home's current watch pointer, validates it against the disk, and prints the running watch's published state: watch id, elapsed and remaining time, current activity, counts of events, dossiers and FLASH alerts, the benched desks or the statement that all standing desks are healthy, and the source kind. A watch on a substituted source carries its source note. A running watch's status also carries the reception pool line: the standing cap, what the pool has consumed and holds reserved, what is free, and the granted bytes this watch itself holds. When no watch is running, status says so in terms that match the disk: the last completed watch is named when the pointer names one, an interrupted watch is named as interrupted with the resume invocation given, and a folder with no state file is reported as a watch no officer is reporting for, and the standing pool is still stated once the home's ledger knows its cap, because the pool belongs to the home and not to a run. On an install laid out in generations, status also appends the update account of chapter 14; a single-tree install's status carries no update lines, and its update state is stated by doctor and by the update verb. Status exits with code 0 in all these cases; it is a report, not a gate. The status verb also takes a --live flag, which attaches the Console of chapter 15 to the current watch instead of printing the plain account: the full-screen terminal frame the liveview module draws, about once a second, from the frames the console module builds out of the dashboard module's view model and the display feed the officer publishes in the watch folder. With --keep-awake the Console also holds the display awake for the view's lifetime, through the keepawake module. The Console is a viewer only: it writes nothing, quitting it with q or Ctrl-C never affects the watch, and without an interactive terminal or curses the flag prints the reason and falls back to the plain account.
 
 ## sitrep
 
@@ -58,5 +59,11 @@ Ask takes a query of one or more words, joined into a single query string, and a
 
 Usage: `multidex [--home DIR] [--profile NAME] doctor`
 
-Doctor runs the muster gates for the loaded profile without standing a watch, prints each gate's verdict and evidence, then prints the desk inventory: every desk with its tier, service, state for this profile and source, and the reason for any bench, followed by the transcription state line and the source capability line. Doctor exits with code 0 when no gate reports FAIL and code 1 when any does. A profile that fails to load is a refusal printed as such, with exit code 2, and this applies to every verb that loads a profile.
+Doctor runs the muster gates for the loaded profile without standing a watch, prints each gate's verdict and evidence, then prints the desk inventory: every desk with its tier, service, state for this profile and source, and the reason for any bench. The transcription state line, the amateur FT8 line and the satellite policy line follow, then the dependence census naming every external program the build invokes and whether it is present, then the source capability line, then the reception pool account for the home, which doctor also refreshes by taking the standing satellite reservations for the passes ahead. The updates account closes the output. Doctor exits with code 0 when no gate reports FAIL and code 1 when any does. A profile that fails to load is a refusal printed as such, with exit code 2, and this applies to every verb that loads a profile.
+
+## update
+
+Usage: `multidex [--home DIR] [--profile NAME] update [check|status|approve|reset|rollback]`
+
+The update verb operates the live update system of chapter 14. With no action named it reports status. The check action runs one update check now against the profile's configured remote, under the same gates a scheduled check runs, and prints its outcome; a check that cannot run prints the reason and exits with code 1. The status action prints the update account: the install's layout and running generation, the effective posture, the highest release counter seen, the last check's outcome, any staged or probationary candidate, and the freeze warning where one stands. The approve action is the notify-only posture's activation path: it approves a staged, gate-passed candidate for activation at the next safe dwell boundary. The reset action clears the recorded activation failures and lifts a degraded posture. The rollback action requests a return to the previous generation, which the keeper performs at a boundary under the same probation as an update. On a single-tree install the machinery does not engage: status states the layout and that the install updates by hand, and the other actions state the same rather than pretending to act. Chapter 14 is the full account of the system this verb operates.
 
