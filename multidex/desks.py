@@ -14,8 +14,12 @@ are benched with the reason stated, never silently absent.
 
 import base64
 import math
+import os
 import random
+import shutil
 import struct
+import subprocess
+import tempfile
 
 from . import codecs, modes
 from .bands import band_name
@@ -212,18 +216,6 @@ def _wav_bytes(seed_key, seconds=0.5):
                                       rate * 2, 2, 16)
               + b"data" + struct.pack("<I", len(frames)))
     return bytes(header) + bytes(frames)
-
-
-def _ppm_bytes(seed_key, width=320, height=200):
-    """A synthetic APT-style image: bright bands over noise."""
-    rng = random.Random(_seed_int(seed_key))
-    rows = bytearray()
-    for y in range(height):
-        band = 90 if (y // 28) % 2 == 0 else 150
-        for _x in range(width):
-            v = max(0, min(255, band + rng.randrange(-38, 38)))
-            rows += bytes((v, v, v))
-    return b"P6\n%d %d\n255\n" % (width, height) + bytes(rows)
 
 
 def _snippet(data_bytes, filename, kind):
@@ -494,6 +486,38 @@ def process_pager(feed, ctx):
 
 # ------------------------------------------------------------- satellite
 
+def _apt_png(feed, image_name):
+    """Decode the feed's APT pass audio with aptdec, when staged.
+
+    Returns the PNG bytes, or None when aptdec is absent, fails, or
+    produces no image from this audio. The desk never invents an
+    image: a recording with no decodable APT subcarrier in it files
+    its audio and the event states that no image was produced.
+    """
+    tool = shutil.which("aptdec")
+    if tool is None:
+        return None
+    wav = base64.b64decode(feed["audio_b64"])
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "pass.wav")
+        with open(src, "wb") as fh:
+            fh.write(wav)
+        try:
+            subprocess.run([tool, "-o", image_name, src], cwd=td,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=300)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        out = os.path.join(td, image_name)
+        if not os.path.exists(out):
+            return None
+        with open(out, "rb") as fh:
+            png = fh.read()
+    if not png.startswith(b"\x89PNG") or len(png) < 200:
+        return None
+    return png
+
+
 def process_satellite(feed, ctx):
     p = ctx.get("pass") or {}
     base = {"emitter_kind": "satellite", "sat": feed.get("sat"),
@@ -504,38 +528,90 @@ def process_satellite(feed, ctx):
                       "aos_az_deg", "los_az_deg")}}
     if feed.get("lock"):
         data = dict(base, quality=feed.get("quality"))
+        quality = feed.get("quality", 0)
         if feed.get("audio_b64"):
-            # Real source: the evidence is the captured pass audio.
-            # APT imagery decode needs a decoder program this build
-            # does not bind, and the desk says so rather than filing
-            # an image it did not receive.
+            # The evidence is the captured pass audio, filed whole.
+            # When the imagery step decodes it, the image is filed
+            # with the same event and named in its data.
             data["audio"] = feed.get("audio_name")
-            data["imagery"] = None
+            snippets = [{"filename": feed.get("audio_name",
+                                              "pass.wav"),
+                         "kind": "satellite",
+                         "b64": feed["audio_b64"]}]
+            sat = (feed.get("sat") or "").upper()
+            image_name = "pass-%s-%d.png" % (feed.get("norad"),
+                                             int(ctx["t0"]))
+            if "METEOR" in sat:
+                # LRPT is a digital downlink and aptdec decodes APT
+                # only; this build does not decode LRPT imagery,
+                # and the event says so rather than implying one.
+                data["imagery"] = None
+                data["imagery_note"] = (
+                    "LRPT imagery is not decoded by this build; "
+                    "the pass audio is filed as evidence")
+                content = ("pass captured, signal quality %.2f; "
+                           "pass audio filed as evidence - imagery "
+                           "is not applicable for LRPT in this build"
+                           % quality)
+            elif "NOAA" not in sat:
+                data["imagery"] = None
+                data["imagery_note"] = (
+                    "this satellite's downlink is not classified "
+                    "for imagery in this build")
+                content = ("pass captured, signal quality %.2f; "
+                           "pass audio filed as evidence - imagery "
+                           "is not classified for this satellite"
+                           % quality)
+            elif shutil.which("aptdec") is None:
+                data["imagery"] = None
+                data["imagery_note"] = (
+                    "APT imagery not decoded: aptdec is not staged "
+                    "on this host")
+                content = ("pass captured, signal quality %.2f; "
+                           "pass audio filed as evidence - APT "
+                           "imagery is not decoded: aptdec is not "
+                           "staged on this host" % quality)
+            else:
+                png = _apt_png(feed, image_name)
+                if png is None:
+                    data["imagery"] = None
+                    data["imagery_note"] = (
+                        "aptdec produced no image from this pass "
+                        "audio")
+                    content = ("pass captured, signal quality %.2f; "
+                               "pass audio filed as evidence - APT "
+                               "imagery is not decoded: aptdec "
+                               "produced no image from this pass"
+                               % quality)
+                else:
+                    data["imagery"] = image_name
+                    snippets.append({
+                        "filename": image_name, "kind": "satellite",
+                        "b64": base64.b64encode(png).decode("ascii")})
+                    content = ("pass captured, signal quality %.2f; "
+                               "APT imagery decoded and filed: %s"
+                               % (quality, image_name))
             ev = make_event(
                 ctx["watch_id"], "satellite", "pass", ctx["t0"],
                 ctx["t1"], freq_hz=ctx.get("freq_hz"),
                 emitter=feed.get("sat"), grade="CONFIRMED",
-                content="pass captured, signal quality %.2f; pass "
-                        "audio filed as evidence - APT imagery is "
-                        "not decoded by this build"
-                        % feed.get("quality", 0),
-                data=data)
-            ev["data"]["_snippet"] = {
-                "filename": feed.get("audio_name", "pass.wav"),
-                "kind": "satellite", "b64": feed["audio_b64"]}
+                content=content, data=data)
+            ev["data"]["_snippet"] = (snippets[0]
+                                      if len(snippets) == 1
+                                      else snippets)
             return [ev]
-        ev = make_event(
+        # A lock whose feed carried no audio: nothing to file and
+        # nothing to decode, stated as such. Both sources record on
+        # a lock, so this is a feed gap, never a synthetic image.
+        data["imagery"] = None
+        data["imagery_note"] = "the feed carried no pass audio"
+        return [make_event(
             ctx["watch_id"], "satellite", "pass", ctx["t0"], ctx["t1"],
             freq_hz=ctx.get("freq_hz"), emitter=feed.get("sat"),
             grade="CONFIRMED",
-            content="pass captured, decode quality %.2f"
-                    % feed.get("quality", 0),
-            data=dict(data, imagery="sat-%s-%d.ppm" % (feed.get("norad"),
-                                                       int(ctx["t0"]))))
-        ev["data"]["_snippet"] = _snippet(
-            _ppm_bytes((feed.get("sat"), int(ctx["t0"]))),
-            ev["data"]["imagery"], "satellite")
-        return [ev]
+            content="pass captured, signal quality %.2f; the feed "
+                    "carried no pass audio" % quality,
+            data=data)]
     return [make_event(
         ctx["watch_id"], "satellite", "pass", ctx["t0"], ctx["t1"],
         freq_hz=ctx.get("freq_hz"), emitter=feed.get("sat"),

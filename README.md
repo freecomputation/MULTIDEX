@@ -153,10 +153,18 @@ in the same window the moderate gain heard nothing.
 Tier 2 is implemented where pure Python honestly carries it and
 benched with the reason where it does not. Satellite pass prediction
 runs from TLE with a simplified two-body propagator and is graded
-PROBABLE wherever it appears; against the simulator, captured passes
-file synthetic APT imagery as evidence, and against the real source
-they file the captured pass audio, with APT imagery stated as not
-decoded by this build. Radiosonde windows are scheduled from
+PROBABLE wherever it appears. On a lock, a pass is recorded whole -
+the real source for the whole remaining pass at maximum tuner gain,
+stored at 11025 Hz, the simulated source as a synthetic recording
+shaped to the published APT line format - and the recording is
+filed as the pass evidence. When aptdec is staged on the host, the
+satellite desk decodes a NOAA pass recording into APT imagery,
+files the image with the pass event, and names it in the event and
+its FLASH; when aptdec is not staged, the pass states that its
+imagery was not decoded, with the reason. METEOR-M2 4 flies an
+LRPT digital downlink: its passes are recorded the same way, and
+their imagery is stated as not applicable for LRPT in this build.
+Radiosonde windows are scheduled from
 configured sites and synoptic hours; against the real source the
 sonde desk files a presence census of carriers in the sonde band
 and states that telemetry is not decoded, because an RS41-class

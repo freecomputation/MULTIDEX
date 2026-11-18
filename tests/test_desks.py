@@ -95,14 +95,32 @@ def test_sweep_desk_marks_unknowns(profile):
 
 
 def test_satellite_desk_lock_and_miss(profile):
+    # A locked feed from either source carries the pass recording;
+    # the desk files it and states the imagery outcome. aptdec is
+    # not staged in the test environment, so the outcome stated is
+    # the honest not-decoded one (the decode itself is covered by
+    # tests/test_fixes_020.py where a decoder is available).
+    from multidex.sim import synthetic_apt_samples
+    from multidex.tuner import _wav_b64
     ok = desks.process_satellite(
         {"lock": True, "quality": 0.8, "max_elev_deg": 55.0,
-         "sat": "NOAA 19", "norad": "33591"},
+         "sat": "NOAA 19", "norad": "33591",
+         "audio_b64": _wav_b64(synthetic_apt_samples(2), 48000),
+         "audio_name": "pass-33591-1794916800.wav",
+         "audio_rate": 48000},
         _ctx(profile, "satellite",
              **{"pass": {"aos": T0, "los": T0 + 600, "t_max": T0 + 300,
                          "max_elev_deg": 55.0}}))
     assert ok[0]["kind"] == "pass" and ok[0]["grade"] == "CONFIRMED"
-    assert ok[0]["data"]["_snippet"]["kind"] == "satellite"
+    snippet = ok[0]["data"]["_snippet"]
+    first = snippet[0] if isinstance(snippet, list) else snippet
+    assert first["kind"] == "satellite"
+    # The imagery outcome is always stated: either an image was
+    # decoded and filed, or the event says why none was.
+    if ok[0]["data"]["imagery"] is None:
+        assert "aptdec" in ok[0]["data"]["imagery_note"]
+    else:
+        assert ok[0]["data"]["imagery"].endswith(".png")
     miss = desks.process_satellite(
         {"lock": False, "quality": 0.0, "max_elev_deg": 4.0,
          "sat": "NOAA 19", "norad": "33591"}, _ctx(profile, "satellite"))

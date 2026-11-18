@@ -17,6 +17,7 @@ import random
 
 from . import codecs, modes, orbit
 from .desks import AIRBAND_CHANNELS, MILAIR_CHANNELS
+from .tuner import _wav_b64
 
 PAGER_FREQ = 929.6125e6
 WX_FREQ = 162.475e6
@@ -282,6 +283,69 @@ class SimWorld:
         lon = flight["site"]["lon"] + flight["drift_e"] * frac / (
             111.32 * math.cos(math.radians(flight["site"]["lat"])))
         return lat, lon, max(climb, 0.0)
+
+
+# ------------------------------------------------------- APT signal
+#
+# A spec-shaped NOAA APT recording for the simulated satellite feed,
+# so the desk's imagery pipeline (record, decode, file the image)
+# runs end to end without hardware. The line format follows the
+# published APT specification: 2080 words per line at 4160 words
+# per second (2 lines per second) - Sync A (1040 Hz pulses), space,
+# image A, telemetry A, Sync B (832 Hz pulses), space, image B,
+# telemetry B - with the video envelope AM-modulating a 2400 Hz
+# subcarrier. The picture is a horizontal gradient with a white
+# block in the middle rows, so a correct decode is recognizable at
+# a glance. Deterministic: the same duration and rate always
+# produce the same samples, and a real APT decoder (aptdec)
+# decodes them into a 2080-pixel-wide image.
+
+_APT_WORDS = 4160        # envelope words per second (1 per word)
+_APT_BLACK, _APT_WHITE = 0.13, 0.95
+
+
+def _apt_sync(n_words, freq):
+    half = _APT_WORDS / (2.0 * freq)
+    out = []
+    pos = 0.0
+    for _ in range(n_words):
+        out.append(_APT_WHITE if (pos % (2 * half)) < half else 0.05)
+        pos += 1.0
+    return out
+
+
+def _apt_line(row):
+    img_a = [_APT_BLACK + (_APT_WHITE - _APT_BLACK) * (i / 908.0)
+             for i in range(909)]
+    img_b = img_a[::-1]
+    if 8 <= row < 16:
+        for i in range(400, 520):
+            img_a[i] = _APT_WHITE
+            img_b[i] = _APT_WHITE
+    return (_apt_sync(39, 1040) + [_APT_BLACK] * 47 + img_a
+            + [0.5] * 45 + _apt_sync(39, 832) + [_APT_BLACK] * 47
+            + img_b + [0.5] * 45)
+
+
+def synthetic_apt_samples(seconds=12, rate=48000):
+    """The synthetic APT recording as a list of int16 samples."""
+    env = []
+    for r in range(int(seconds * 2)):
+        env.extend(_apt_line(r))
+    out = []
+    total = int(seconds * rate)
+    last = len(env) - 1
+    for i in range(total):
+        pos = i * _APT_WORDS / rate
+        j = int(pos)
+        if j >= last:
+            value = env[last]
+        else:
+            frac = pos - j
+            value = env[j] * (1.0 - frac) + env[j + 1] * frac
+        sample = value * math.cos(2 * math.pi * 2400 * i / rate)
+        out.append(int(max(-1.0, min(1.0, sample * 0.9)) * 32767))
+    return out
 
 
 class SimSource:
@@ -674,11 +738,22 @@ class SimSource:
     def _satellite_feed(self, vfo):
         p = vfo.get("pass") or {}
         max_elev = p.get("max_elev_deg", 0)
-        return {"lock": max_elev >= 12.0,
+        feed = {"lock": max_elev >= 12.0,
                 "quality": round(min(1.0, max(0.0,
                                  (max_elev - 8) / 60.0)), 2),
                 "max_elev_deg": max_elev, "sat": p.get("sat"),
                 "norad": p.get("norad")}
+        if feed["lock"]:
+            # A locked simulated pass carries a synthetic APT
+            # recording, shaped to the published line format, so
+            # the satellite desk records, decodes and files imagery
+            # from it exactly as it does from a real capture.
+            feed["audio_b64"] = _wav_b64(synthetic_apt_samples(),
+                                         48000)
+            feed["audio_name"] = "pass-%s-%d.wav" % (
+                p.get("norad"), int(p.get("aos") or 0))
+            feed["audio_rate"] = 48000
+        return feed
 
     def _amateur_feed(self, center_hz, t0, t1):
         """CW by genuine round-trip: the message is encoded to IQ
