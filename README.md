@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.3.0.
+Version 0.4.0.
 
 ## The verbs
 
@@ -24,7 +24,12 @@ anything it cannot get is a refusal with the reason in plain words.
 
 - `multidex watch` - muster, then stand the 24-hour watch.
   `multidex watch --resume <watch-id>` resumes an interrupted watch
-  from its on-disk state.
+  from its on-disk state. On an interactive terminal the watch
+  hands the screen to the live dashboard (see `status --live`)
+  once it stands; quitting the view leaves the watch running in
+  the terminal, and the completion line prints when the watch
+  stands down. Off a terminal, the watch runs as it always has,
+  printing the completion line at stand-down.
 - `multidex plan` - build and print the watch bill without touching
   the tuner.
 - `multidex status` - five lines: current dwell, elapsed and
@@ -33,6 +38,15 @@ anything it cannot get is a refusal with the reason in plain words.
   its state file records is still alive; a watch whose officer is
   gone is reported as not running and named as interrupted, and a
   watch folder with no state file is never reported as running.
+  `multidex status --live` attaches a full-screen live dashboard
+  to the current watch: the tuner's current dwell and what comes
+  next, the event feed as it files with FLASH items marked, desk
+  states with bench reasons, band activity, and the coverage
+  totals, refreshed about once a second from the watch's recorded
+  state. The view is read-only and quitting it (q or Ctrl-C) never
+  affects the watch; a completed watch renders its final account,
+  marked complete. Without an interactive terminal or curses, it
+  prints the reason and the plain five-line status instead.
 - `multidex sitrep` - render a SITREP for the running (or latest)
   watch now.
 - `multidex stop` - stand the watch down at the next dwell boundary;

@@ -8,6 +8,7 @@ refusal with the reason.
 import argparse
 import os
 import sys
+import threading
 import time
 
 from . import gates, products, util
@@ -43,9 +44,69 @@ def _load(args, home):
     return load_profile(_profile_path(args, home))
 
 
+def _cmd_watch_tty(args, home, profile):
+    """The watch verb on a terminal: the officer runs the watch as
+    always, and once muster publishes the first state the terminal
+    becomes the live dashboard. Quitting the view leaves the watch
+    running in this terminal; the completion line prints when the
+    watch stands down, exactly as without the view.
+    """
+    from . import liveview
+    box = {}
+
+    def officer():
+        # The Index and its SQLite connection are born and used on
+        # this thread alone, exactly as the single-threaded path
+        # uses them on the main thread.
+        index = Index(home)
+        try:
+            runner = WatchRunner(home, profile, index)
+            box["runner"] = runner
+            box["result"] = runner.start(resume_id=args.resume)
+        except Exception as exc:  # re-raised on this thread below
+            box["error"] = exc
+        finally:
+            index.close()
+
+    thread = threading.Thread(target=officer, daemon=True)
+    thread.start()
+    watch_id = None
+    while thread.is_alive():
+        runner = box.get("runner")
+        wid = getattr(runner, "watch_id", None) if runner else None
+        if wid and products._watch_state(home, wid) is not None:
+            watch_id = wid
+            break
+        time.sleep(0.05)
+    if watch_id and thread.is_alive():
+        ran, reason = liveview.attach(home, watch_id)
+        if ran:
+            print("View closed. Watch %s keeps running in this "
+                  "terminal." % watch_id)
+            print("Reattach the live view with: multidex status "
+                  "--live")
+            print("Stop the watch with: multidex stop")
+        else:
+            print("Live view unavailable: %s. The watch is running; "
+                  "multidex status shows its state." % reason)
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    result = box.get("result") or {}
+    if not result.get("ok"):
+        print(result.get("refusal", "the watch did not stand"))
+        return 2
+    print("Watch %s stood and completed. Products are in %s"
+          % (result["watch_id"],
+             os.path.join(home, "watches", result["watch_id"])))
+    return 0
+
+
 def cmd_watch(args):
     home = _home(args)
     profile = _load(args, home)
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return _cmd_watch_tty(args, home, profile)
     index = Index(home)
     try:
         runner = WatchRunner(home, profile, index)
@@ -83,7 +144,11 @@ def cmd_plan(args):
 
 
 def cmd_status(args):
-    print(products.status_text(_home(args)))
+    home = _home(args)
+    if getattr(args, "live", False):
+        from . import liveview
+        return liveview.run_live(home)
+    print(products.status_text(home))
     return 0
 
 
@@ -177,8 +242,12 @@ def main(argv=None):
     p_watch.set_defaults(fn=cmd_watch)
     sub.add_parser("plan", help="print the watch bill").set_defaults(
         fn=cmd_plan)
-    sub.add_parser("status", help="state of the running watch") \
-        .set_defaults(fn=cmd_status)
+    p_status = sub.add_parser("status", help="state of the running "
+                                             "watch")
+    p_status.add_argument("--live", action="store_true",
+                          help="attach the live terminal dashboard "
+                               "to the current watch")
+    p_status.set_defaults(fn=cmd_status)
     sub.add_parser("sitrep", help="render a SITREP now").set_defaults(
         fn=cmd_sitrep)
     sub.add_parser("stop", help="stand the watch down now").set_defaults(
