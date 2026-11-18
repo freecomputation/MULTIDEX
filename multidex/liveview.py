@@ -165,7 +165,13 @@ def _totals_rows(view, pal):
             % (t["events"], t["dossiers"], t["flash"], t["snippets"],
                util.fmt_duration(t["executed_s"]),
                util.fmt_duration(t["planned_s"]), t["gaps"]))
-    return [[(line, pal["normal"])]]
+    rows = [[(line, pal["normal"])]]
+    if t.get("budget_allocated_bytes") is not None:
+        rows.append([("Reception budget %d of %d bytes consumed"
+                      % (t["budget_consumed_bytes"] or 0,
+                         t["budget_allocated_bytes"]),
+                      pal["normal"])])
+    return rows
 
 
 def _feed_rows(view, pal, limit):

@@ -3,7 +3,8 @@
 MULTIDEX is a standard-library build. A small number of desks
 decode through a proven external program when the host carries
 one - the WSJT-X jt9 decoder for FT8, dumpvdl2 for VDL2, DSD-FME
-for digital-voice signalling. The binding is arms-length: the
+for digital-voice signalling, SatDump for METEOR LRPT imagery.
+The binding is arms-length: the
 program is invoked as a separate process over files, never
 linked, never bundled. When the program is absent the desk
 benches with the staging instruction as its reason, stated on

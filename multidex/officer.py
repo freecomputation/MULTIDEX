@@ -16,7 +16,7 @@ import os
 import threading
 import time
 
-from . import gates, orbit, products, util
+from . import budget, gates, orbit, products, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -235,6 +235,10 @@ def build_bill(profile, start, sats):
     for i, item in enumerate(bill):
         item["id"] = "bill-%03d" % (i + 1)
         item.setdefault("pass", None)
+    # Reception containment: every planned reception carries its
+    # computed allocation (tuner seconds, worst-case bytes) from
+    # the moment the bill exists.
+    budget.annotate_bill(bill)
     return bill
 
 
@@ -257,6 +261,19 @@ class WatchRunner:
         self._tx_results = []
         self._tx_lock = threading.Lock()
         self._tx_errors = 0
+        # Reception containment: the muster budget and the live
+        # ledger of held snippet bytes it is accounted against.
+        self.budget = None
+        self._bill_cls = {}
+        self._held = {}
+        self._held_by_desk = {}
+        self._held_total = 0
+        self._shed_total = 0
+        # Post-pass LRPT decode (bounded background step).
+        self._lrpt_queue = None
+        self._lrpt_worker = None
+        self._lrpt_results = []
+        self._lrpt_lock = threading.Lock()
 
     # ------------------------------------------------------------ helpers
     def _resolve_source(self, watch_start):
@@ -442,8 +459,18 @@ class WatchRunner:
         self.supervisor.set_watch_dir(self.watch_dir)
         self.exploit = Exploit(self.index, profile)
         self._start_transcription()
+        self._start_lrpt_decode()
         bill = build_bill(profile, start, sats)
         util.write_json(os.path.join(self.watch_dir, "bill.json"), bill)
+        # Reception containment is computed at muster, from the
+        # profile's ceiling and this bill, before the first dwell:
+        # if the worst case cannot fit, the budget has already
+        # degraded coherently and its statements file below.
+        self.budget = budget.build_reception_budget(profile, bill)
+        self._bill_cls = {i["id"]: i["cls"] for i in bill}
+        util.write_json(os.path.join(self.watch_dir, "budget.json"),
+                        {"summary": self.budget.summary(),
+                         "allocations": self.budget.allocations})
         meta = {
             "watch_id": watch_id, "start": start,
             "planned_end": start + profile["watch"]["hours"] * 3600,
@@ -457,6 +484,7 @@ class WatchRunner:
             "ended_early": False, "end_reason": None, "resumed": False,
             "source_note": source_note,
             "time_scale": self._scale,
+            "reception_budget": self.budget.summary(),
         }
         self.meta = meta
         self.index.set_watch_meta(watch_id, meta)
@@ -474,6 +502,25 @@ class WatchRunner:
             content="muster passed; watch stood with %d bill items"
                     % len(bill), grade="CONFIRMED",
             data=muster_data))
+        b = self.budget
+        self._file(make_event(
+            watch_id, "officer", "system", start, start,
+            grade="CONFIRMED",
+            content="reception budget: ceiling %d bytes; the "
+                    "bill's worst case is %d bytes, of which the "
+                    "satellite reserve is %d bytes, leaving a "
+                    "free margin of %d bytes"
+                    % (b.ceiling_bytes, b.total_bytes,
+                       b.satellite_reserve_bytes,
+                       b.free_margin_bytes),
+            data={"reception_budget": b.summary()}))
+        for statement in b.degraded:
+            self._file(make_event(
+                watch_id, "officer", "system", start, start,
+                grade="CONFIRMED",
+                content="reception budget degraded at muster: %s"
+                        % statement,
+                data={"reception_budget_degraded": statement}))
         for name in sorted(SPECS):
             reason = self._desk_benched_reason(name, source)
             if reason:
@@ -542,6 +589,16 @@ class WatchRunner:
         self.exploit = Exploit(self.index, profile)
         bill = util.read_json(os.path.join(self.watch_dir, "bill.json"),
                               default=[])
+        # The reception budget is recomputed from the same bill
+        # and profile, and the held ledger re-derived from the
+        # snippet store: a resumed watch accounts exactly what
+        # the store holds, under the same allocations.
+        self.budget = budget.build_reception_budget(profile, bill)
+        self._bill_cls = {i["id"]: i["cls"] for i in bill}
+        self._rebuild_held()
+        if "reception_budget" not in meta:
+            meta["reception_budget"] = self.budget.summary()
+        self._start_lrpt_decode()
         source = self._source_for_meta(meta, meta["start"])
         self.source_note = meta.get("source_note")
         # The muster gates re-run on resume: the footing is verified
@@ -613,6 +670,74 @@ class WatchRunner:
                     pass
             raise
         return {"ok": True, "watch_id": watch_id}
+
+    def _rebuild_held(self):
+        """Re-derive the held-bytes ledger from the Index's
+        snippet rows: the ledger is a view of the snippet store,
+        so a resumed watch accounts exactly what the store holds."""
+        self._held = {}
+        self._held_by_desk = {}
+        self._held_total = 0
+        self._shed_total = 0
+        for row in self.index.snippet_rows(self.watch_id):
+            if row["shed"]:
+                self._shed_total += row["bytes"]
+                continue
+            bid = budget.bill_id_of_snippet_path(row["path"])
+            if bid:
+                self._held[bid] = self._held.get(bid, 0) + row["bytes"]
+            desk = row["desk"]
+            self._held_by_desk[desk] = \
+                self._held_by_desk.get(desk, 0) + row["bytes"]
+            self._held_total += row["bytes"]
+
+    def _held_add(self, bill_id, desk, size):
+        if bill_id:
+            self._held[bill_id] = self._held.get(bill_id, 0) + size
+        self._held_by_desk[desk] = \
+            self._held_by_desk.get(desk, 0) + size
+        self._held_total += size
+
+    def _held_shed(self, victim):
+        bid = budget.bill_id_of_snippet_path(victim["path"])
+        if bid and bid in self._held:
+            self._held[bid] = max(0, self._held[bid]
+                                  - victim["bytes"])
+        desk = victim["desk"]
+        if desk in self._held_by_desk:
+            self._held_by_desk[desk] = max(
+                0, self._held_by_desk[desk] - victim["bytes"])
+        self._held_total = max(0, self._held_total - victim["bytes"])
+        self._shed_total += victim["bytes"]
+
+    def _budget_state(self):
+        """The live budget block state.json carries: allocated
+        versus consumed, per class, with the satellite reserve
+        broken out - the same numbers the Watch Report's
+        reception account renders at stand-down."""
+        b = self.budget
+        consumed_by_class = {}
+        for bid, n in self._held.items():
+            cls = self._bill_cls.get(bid)
+            if cls:
+                consumed_by_class[cls] = \
+                    consumed_by_class.get(cls, 0) + n
+        by_class = {}
+        for cls, alloc in sorted(b.summary()["by_class"].items()):
+            by_class[cls] = {
+                "allocated": alloc["bytes"],
+                "consumed": consumed_by_class.get(cls, 0)}
+        return {
+            "ceiling_bytes": b.ceiling_bytes,
+            "allocated_bytes": b.total_bytes,
+            "consumed_bytes": self._held_total,
+            "shed_bytes": self._shed_total,
+            "satellite_reserve_bytes": b.satellite_reserve_bytes,
+            "satellite_consumed_bytes":
+                self._held_by_desk.get("satellite", 0),
+            "by_class": by_class,
+            "degraded": bool(b.degraded),
+        }
 
     # ---------------------------------------------------------------- run
     def _run_bill(self, bill, from_index, watch_start,
@@ -739,10 +864,13 @@ class WatchRunner:
             "heartbeat_s": elapsed,
             "executing": executing,
         }
+        if self.budget is not None:
+            state["budget"] = self._budget_state()
         util.write_json(os.path.join(self.watch_dir, "state.json"), state)
 
     def _execute(self, item, watch_start, actual_start=None):
         self._drain_transcripts()
+        self._drain_lrpt()
         planned_start = item["start"]
         t0 = actual_start if actual_start is not None else planned_start
         t1 = t0 + item["dur"]
@@ -764,8 +892,27 @@ class WatchRunner:
         if item["kind"] == "pass" and ("satellite" in standing
                                        or "iss" in standing):
             pdesk = "iss" if "iss" in item["desks"] else "satellite"
-            vfos = [{"desk": pdesk, "freq_hz": item["center_hz"],
-                     "bw_hz": 150e3, "pass": item.get("pass")}]
+            vfo = {"desk": pdesk, "freq_hz": item["center_hz"],
+                   "bw_hz": 150e3, "pass": item.get("pass")}
+            if pdesk == "satellite" and self.budget is not None \
+                    and budget.downlink_kind(
+                        (item.get("pass") or {}).get("sat")) == "lrpt":
+                # The LRPT capture's byte cap is this item's
+                # reception allocation minus the decoded image's
+                # allowance: the capture stops at the allocation,
+                # inside the tuner, not at the disk ceiling.
+                alloc = self.budget.allocation_for(item["id"])
+                if alloc is not None:
+                    # Normally the cap is the allocation minus the
+                    # decoded image's allowance. A reservation
+                    # degraded below that allowance gives the
+                    # allowance up instead: the capture still gets
+                    # its floored room and truncates there.
+                    vfo["byte_cap"] = (
+                        alloc - budget.LRPT_PNG_ALLOWANCE
+                        if alloc > budget.LRPT_PNG_ALLOWANCE
+                        else alloc)
+            vfos = [vfo]
         new_events = []
         heard = {}
         try:
@@ -849,6 +996,7 @@ class WatchRunner:
                     for ev in events:
                         self._adopt_snippet(ev, name, item["id"])
                         self._submit_transcription(ev)
+                        self._submit_lrpt(ev, item["id"])
                         new_events.append(ev)
                     heard[name] = len(events)
                 except Exception as exc:
@@ -914,31 +1062,76 @@ class WatchRunner:
             self._file_snippet(ev, desk, bill_id, one)
 
     def _file_snippet(self, ev, desk, bill_id, payload):
-        import base64 as _b64
-        data = _b64.b64decode(payload["b64"])
-        cap = None
-        if payload["kind"] == "voice":
-            cap = self.profile["snippets"]["voice_cap_per_desk"]
-        elif payload["kind"] == "iq":
-            cap = self.profile["snippets"]["iq_max_per_watch"]
         ceiling = int(self.profile["watch"]["disk_ceiling_gb"] * 1e9)
         # Every snippet filename carries the watch id and the bill
         # item id: two dwells can never produce the same path, so one
         # event's evidence can never overwrite another's.
         filename = "%s-%s-%s" % (self.watch_id, bill_id,
                                  payload["filename"])
-        rel, shed = self.index.keep_snippet(
-            self.watch_id, self.watch_dir, desk, payload["kind"],
-            filename, data, ceiling, count_cap=cap, t=ev["t_start"])
+        src = payload.get("file")
+        if src is not None:
+            # A file payload: the evidence already exists on disk.
+            # A full-pass LRPT recording is hundreds of megabytes -
+            # far too large to ride the feed as base64 - so it moves
+            # by reference and its size is read from the file. The
+            # staging file is consumed either way: kept (copied into
+            # the snippet store) or refused, it never lingers.
+            size = os.path.getsize(src) if os.path.exists(src) else 0
+            data = None
+        else:
+            import base64 as _b64
+            data = _b64.b64decode(payload["b64"])
+            size = len(data)
+        cap = None
+        if payload["kind"] == "voice":
+            cap = self.profile["snippets"]["voice_cap_per_desk"]
+        elif payload["kind"] == "iq":
+            cap = self.profile["snippets"]["iq_max_per_watch"]
+        try:
+            # Reception containment, enforced at filing: a bill
+            # item's kept evidence may not pass the allocation
+            # computed for it at muster. A payload that would cross
+            # the boundary is refused here and the refusal is
+            # logged by the Index with the allocation named. The
+            # capture side truncates at the same boundary, so this
+            # is the backstop, not the mechanism.
+            alloc = self.budget.allocation_for(bill_id) \
+                if self.budget is not None else None
+            if alloc is not None and size > 0 \
+                    and self._held.get(bill_id, 0) + size > alloc:
+                self.index._record_snippet_refusal(
+                    self.watch_id, desk, payload["kind"], filename,
+                    size,
+                    "exceeds the bill item's reception allocation "
+                    "(%d of %d bytes already held for this item)"
+                    % (self._held.get(bill_id, 0), alloc),
+                    t=ev["t_start"])
+                return
+            rel, shed = self.index.keep_snippet(
+                self.watch_id, self.watch_dir, desk, payload["kind"],
+                filename, data, ceiling, count_cap=cap,
+                t=ev["t_start"], source_path=src)
+        finally:
+            if src is not None and os.path.exists(src):
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
         for victim in shed:
+            self._held_shed(victim)
             self.index.add_event(make_event(
                 self.watch_id, "officer", "system", ev["t_start"],
                 ev["t_end"], grade="CONFIRMED",
                 content="snippet shed under the disk ceiling: %s"
                         % victim["path"],
-                data={"shed": victim["path"]}))
+                data={"shed": victim["path"],
+                      "desk": victim["desk"],
+                      "bill_id": budget.bill_id_of_snippet_path(
+                          victim["path"]),
+                      "bytes": victim["bytes"]}))
         if rel:
             ev["snippet"] = rel
+            self._held_add(bill_id, desk, size)
 
     # -------------------------------------------------- transcription
     def _start_transcription(self):
@@ -1034,6 +1227,111 @@ class WatchRunner:
                 data={"transcription": counts}))
             self._tx_queue = None
 
+    # -------------------------------------------------- LRPT decode
+    def _start_lrpt_decode(self):
+        """Bind the bounded LRPT decode queue when SatDump is
+        staged on the host. Absence is a state the satellite desk
+        already states in every LRPT pass event, never an error.
+        Unlike transcription this binds for the simulated source
+        too: the simulated feed's LRPT IQ is a synthetic fixture,
+        and a decode attempt against it files its honest outcome
+        (a synthetic pass cannot yield real imagery, and the
+        imagery event carries the synthetic flag either way)."""
+        from . import lrpt
+        if not lrpt.satdump_available():
+            return
+        self._lrpt_queue = lrpt.DecodeQueue()
+
+        def sink(job, png, info_or_reason):
+            with self._lrpt_lock:
+                self._lrpt_results.append((job, png, info_or_reason))
+
+        self._lrpt_worker = lrpt.DecodeWorker(self._lrpt_queue, sink)
+        self._lrpt_worker.start()
+
+    def _submit_lrpt(self, ev, bill_id):
+        if self._lrpt_queue is None:
+            return
+        if ev["data"].get("lrpt_decode") != "pending":
+            return
+        rel = ev.get("snippet")
+        if not rel:
+            return
+        self._lrpt_queue.submit({
+            "iq_path": os.path.join(self.watch_dir, rel),
+            "iq_rate": ev["data"].get("iq_rate"),
+            "sat": ev["data"].get("sat"),
+            "image_name": ev["data"].get("imagery_file"),
+            "synthetic": bool(ev["data"].get("synthetic")),
+            "pass_event": ev["id"],
+            "bill_id": bill_id,
+            "t0": ev["t_start"], "t1": ev["t_end"],
+            "freq_hz": ev.get("freq_hz")})
+
+    def _drain_lrpt(self):
+        if self._lrpt_queue is None:
+            return
+        with self._lrpt_lock:
+            results, self._lrpt_results = self._lrpt_results, []
+        for job, png, info in results:
+            if png is not None:
+                ev = make_event(
+                    self.watch_id, "satellite", "imagery",
+                    job["t0"], job["t1"], freq_hz=job["freq_hz"],
+                    grade="CONFIRMED",
+                    content="LRPT imagery decoded and filed: %s"
+                            % job["image_name"],
+                    data={"downlink": "lrpt", "sat": job["sat"],
+                          "imagery": job["image_name"],
+                          "imagery_file": job["image_name"],
+                          "pass_event": job["pass_event"],
+                          "bill_id": job["bill_id"],
+                          "synthetic": job["synthetic"],
+                          "decode": info})
+                import base64 as _b64
+                ev["data"]["_snippet"] = {
+                    "filename": job["image_name"], "kind": "imagery",
+                    "b64": _b64.b64encode(png).decode()}
+                self._adopt_snippet(ev, "satellite", job["bill_id"])
+                self._file(ev)
+            else:
+                self._file(make_event(
+                    self.watch_id, "satellite", "imagery",
+                    job["t0"], job["t1"], freq_hz=job["freq_hz"],
+                    grade="CONFIRMED",
+                    content="LRPT imagery not decoded: %s; the "
+                            "pass IQ stands as the evidence"
+                            % info,
+                    data={"downlink": "lrpt", "sat": job["sat"],
+                          "imagery": None,
+                          "pass_event": job["pass_event"],
+                          "bill_id": job["bill_id"],
+                          "synthetic": job["synthetic"],
+                          "decode_reason": info}))
+
+    def _stop_lrpt_decode(self):
+        if self._lrpt_worker is not None:
+            self._lrpt_worker.stop()
+            self._lrpt_worker = None
+        self._drain_lrpt()
+        if self._lrpt_queue is not None:
+            counts = dict(self._lrpt_queue.counts)
+            counts["pending_at_stand_down"] = self._lrpt_queue.pending()
+            if counts["submitted"]:
+                self._file(make_event(
+                    self.watch_id, "officer", "system",
+                    self.meta["end"], self.meta["end"],
+                    grade="CONFIRMED",
+                    content="LRPT decode accounting: %d submitted, "
+                            "%d decoded, %d failed, %d dropped by "
+                            "queue, %d pending at stand-down"
+                            % (counts["submitted"], counts["decoded"],
+                               counts["failed"],
+                               counts["dropped_queue"],
+                               counts["pending_at_stand_down"]),
+                    data={"lrpt_decode": counts}))
+            self._lrpt_queue = None
+
     def _maybe_interrupt(self, item, new_events, watch_start):
         if item["cls"] not in ("B", "C"):
             return
@@ -1072,6 +1370,7 @@ class WatchRunner:
             end = watch_start + self._elapsed(bill)
         self.meta["end"] = end
         self._stop_transcription()
+        self._stop_lrpt_decode()
         self.index.set_watch_meta(self.watch_id, self.meta)
         util.write_json(os.path.join(self.watch_dir, "watch.json"),
                         self.meta)
@@ -1108,6 +1407,8 @@ class WatchRunner:
             "heartbeat_s": end - watch_start,
             "executing": None,
         }
+        if self.budget is not None:
+            state["budget"] = self._budget_state()
         util.write_json(os.path.join(self.watch_dir, "state.json"),
                         state)
         util.write_json(os.path.join(self.home, "current_watch"), None)

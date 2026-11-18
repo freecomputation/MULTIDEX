@@ -24,6 +24,11 @@ multimon-ng - and feeds the standing desks from real captures:
   frequency; on a lock the whole remaining pass is recorded at
   maximum gain and filed as evidence, and the satellite desk
   decodes APT imagery from that recording when aptdec is staged.
+  A METEOR pass is a digital LRPT downlink, not audio: on a lock
+  the pass is recorded as raw IQ at the LRPT rate, bounded by
+  the reception allocation the officer put on the vfo, and the
+  desk's imagery step decodes it with SatDump after the pass
+  when that program is staged.
 
 Desks that need a decoder program outside that tool set bench with
 the reason stated (multidex.desks). A capture failure on one desk is
@@ -652,6 +657,10 @@ class RealSource:
             "present" if shutil.which("aptdec") else
             "absent (satellite passes file their audio; APT imagery "
             "is reported not decoded)")
+        detail += "; satdump %s" % (
+            "present" if shutil.which("satdump") else
+            "absent (METEOR passes file their IQ; LRPT imagery is "
+            "reported not decoded)")
         return True, detail
 
     def capabilities(self):
@@ -722,6 +731,30 @@ class RealSource:
                 os.remove(path)
             except OSError:
                 pass
+
+    def _iq_to_file(self, center_hz, rate, nsamp, seconds=40,
+                    gain="23"):
+        """Stream an IQ capture to a file the caller keeps.
+
+        The LRPT pass recording is far too large to ride the feed
+        as bytes; it is staged in a file and the feed carries the
+        path. Returns (path, bytes_written). Ownership of the
+        file passes to the caller. Raises TunerLost when the
+        capture produced nothing at all.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".cu8",
+                                         delete=False) as fh:
+            path = fh.name
+        size = _stream_to_file(
+            ["rtl_sdr", "-f", str(int(center_hz)), "-s", str(rate),
+             "-n", str(nsamp), "-g", gain, path], path, seconds)
+        if size == 0:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise TunerLost("rtl_sdr produced no samples")
+        return path, size
 
     # --------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -1245,6 +1278,8 @@ class RealSource:
         feed = {"lock": lock,
                 "quality": round(min(1.0, max(0.0, (best or 0.0) / 30.0)), 2),
                 "sat": p.get("sat"), "norad": p.get("norad")}
+        if lock and (p.get("sat") or "").upper().find("METEOR") >= 0:
+            return self._record_lrpt(feed, vfo, p, t0, t1)
         if lock:
             # Record the whole remaining pass at maximum gain. APT
             # imagery decodes from a continuous full-pass capture;
@@ -1268,6 +1303,46 @@ class RealSource:
             feed["audio_name"] = "pass-%s-%d.wav" % (p.get("norad"),
                                                      int(t0))
             feed["audio_rate"] = 11025
+        return feed
+
+    def _record_lrpt(self, feed, vfo, p, t0, t1):
+        """Record a locked METEOR pass as raw IQ for LRPT decode.
+
+        LRPT is a digital QPSK downlink; there is no audio to
+        demodulate, and an FM recording of it can never be decoded
+        after the fact, so the evidence is the baseband itself.
+        The recording runs at the LRPT rate (multidex.budget) for
+        the whole remaining pass at maximum gain, as the APT
+        recording does - and it is the first citizen of the
+        reception allocation: the officer puts the item's byte
+        cap on the vfo, and the capture stops cleanly at the cap
+        with the truncation carried in the feed, never discovered
+        at the disk ceiling mid-pass.
+        """
+        from .budget import LRPT_BYTES_PER_SAMPLE, LRPT_IQ_RATE
+        end = min(t1, p.get("los") or t1)
+        now = time.time()
+        start = now if t0 <= now <= end else t0
+        seconds = max(0.0, end - start)
+        want = int(seconds * LRPT_IQ_RATE)
+        truncated = False
+        cap = vfo.get("byte_cap")
+        if cap is not None:
+            max_samples = int(cap) // LRPT_BYTES_PER_SAMPLE
+            if want > max_samples:
+                want = max_samples
+                truncated = True
+        path, size = self._iq_to_file(vfo["freq_hz"], LRPT_IQ_RATE,
+                                      want, seconds=seconds + 30,
+                                      gain="49.6")
+        feed["iq_file"] = path
+        feed["iq_name"] = "pass-%s-%d.cu8" % (p.get("norad"), int(t0))
+        feed["iq_rate"] = LRPT_IQ_RATE
+        feed["iq_format"] = "cu8"
+        feed["iq_bytes"] = size
+        feed["iq_truncated"] = truncated
+        feed["iq_seconds"] = round(
+            size / float(LRPT_BYTES_PER_SAMPLE * LRPT_IQ_RATE), 1)
         return feed
 
     def _feed_sonde(self, vfos, center_hz, bw_hz, t0, t1):

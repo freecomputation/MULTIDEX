@@ -181,7 +181,42 @@ def doctor_text(profile, home):
                      "on this host; the amateur desk still stands "
                      "for CW, and SSB voice on its windows is the "
                      "audio census desk's catch")
+    if _ta("satdump"):
+        lines.append("- satellite LRPT: bound - the host satdump "
+                     "program decodes recorded METEOR IQ into "
+                     "imagery after each pass")
+    else:
+        lines.append("- satellite LRPT: satdump is not staged on "
+                     "this host; METEOR passes still record and "
+                     "file their IQ, and their events state that "
+                     "LRPT imagery was not decoded")
     lines.append("Source capabilities: %s"
                  % (", ".join(sorted(capabilities)) if capabilities
                     else "all desks (simulated source)"))
+    # The reception budget's shape for this profile, computed on
+    # a bill built from now: the same numbers muster will state,
+    # so a short ceiling is visible before any watch stands.
+    # Local imports: the officer imports this module.
+    try:
+        import time as _time
+        from . import budget as _budget_mod
+        from . import officer as _officer_mod
+        _sats, _path = load_sats(profile)
+        _bill = _officer_mod.build_bill(profile, _time.time(),
+                                        _sats)
+        _rb = _budget_mod.build_reception_budget(profile, _bill)
+        _s = _rb.summary()
+        lines.append("Reception budget for this profile: ceiling "
+                     "%d bytes; a bill built from now allocates "
+                     "%d bytes worst case, %d of it satellite "
+                     "reserve, %d bytes free margin"
+                     % (_s["ceiling_bytes"], _s["total_bytes"],
+                        _s["satellite_reserve_bytes"],
+                        _s["free_margin_bytes"]))
+        for _statement in _s["degraded"]:
+            lines.append("Reception budget degraded: %s"
+                         % _statement)
+    except Exception as exc:
+        lines.append("Reception budget: could not be computed "
+                     "(%s: %s)" % (type(exc).__name__, exc))
     return "\n".join(lines)

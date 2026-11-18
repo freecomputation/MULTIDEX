@@ -8,8 +8,10 @@ principle. APT imagery needs the whole pass, recorded at maximum
 gain like the ADS-B capture (0.1.3), and a decoder: aptdec, used
 when it is staged on the host and stated as absent when it is
 not. METEOR-M2 4 flies LRPT, a digital downlink aptdec does not
-decode, and its passes say imagery is not applicable rather
-than implying a picture.
+decode; through 0.4.0 its passes said imagery was not
+applicable. The 0.4.1 contract supersedes that: an LRPT pass
+files raw IQ and states its decode state - see
+tests/test_fixes_041.py, which carries the LRPT tests now.
 """
 
 import array
@@ -166,28 +168,40 @@ def test_absent_aptdec_is_stated_not_silent(profile, monkeypatch,
 
 
 @needs_aptdec
-def test_meteor_lrpt_claims_no_imagery(profile, monkeypatch, tmp_path):
+def test_meteor_lrpt_files_iq_not_audio(profile, monkeypatch,
+                                        tmp_path):
+    # The 0.4.1 contract: a locked METEOR pass files raw IQ,
+    # never audio, and aptdec never runs for it. With no satdump
+    # on PATH the pass states its imagery was not decoded.
     marker = tmp_path / "aptdec-ran"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     script = bin_dir / "aptdec"
-    script.write_text("#!/bin/sh\ntouch \"%s\"\nexec \"%s\" \"$@\"\n"
-                      % (marker, REAL_APTDEC))
+    script.write_text("#!/bin/sh\ntouch \"%s\"\n" % marker)
     script.chmod(0o755)
     monkeypatch.setenv(
-        "PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
-    feed = _apt_feed(sat="METEOR-M2 4", norad="59051", seconds=2)
+        "PATH", str(bin_dir) + os.pathsep + "/usr/bin:/bin")
+    from multidex.sim import synthetic_lrpt_iq
+    iq = synthetic_lrpt_iq(seconds=1)
+    feed = {"lock": True, "quality": 0.8, "sat": "METEOR-M2 4",
+            "norad": "59051",
+            "iq_b64": base64.b64encode(iq).decode("ascii"),
+            "iq_name": "pass-59051-%d.cu8" % int(T0),
+            "iq_rate": 1024000, "iq_format": "cu8",
+            "iq_bytes": len(iq), "iq_synthetic": True}
     events = desks.process_satellite(
         feed, _ctx(profile, "satellite", **{"pass": _pass()}))
     ev = events[0]
     assert ev["grade"] == "CONFIRMED"
+    assert ev["data"]["downlink"] == "lrpt"
     assert ev["data"]["imagery"] is None
-    assert "LRPT" in ev["data"]["imagery_note"]
-    assert "not applicable for LRPT" in ev["content"]
+    assert ev["data"]["lrpt_decode"] == "not staged"
+    assert "satdump is not staged" in ev["content"]
+    assert ev["data"]["synthetic"] is True
     assert not marker.exists()  # the APT decoder was never run
     snippet = ev["data"]["_snippet"]
     assert isinstance(snippet, dict)
-    assert snippet["filename"].endswith(".wav")
+    assert snippet["filename"].endswith(".cu8")
 
 
 # --------------------------------------------- the recorder (real)

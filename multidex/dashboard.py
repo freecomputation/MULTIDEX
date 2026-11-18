@@ -301,6 +301,10 @@ def build_view(raw, now=None):
             "executed_s": raw["executed_s"],
             "planned_s": planned_dwell,
             "gaps": raw["gaps"],
+            "budget_allocated_bytes":
+                (state.get("budget") or {}).get("allocated_bytes"),
+            "budget_consumed_bytes":
+                (state.get("budget") or {}).get("consumed_bytes"),
         },
         "desks": desks,
         "bands": bands,

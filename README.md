@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.4.0.
+Version 0.4.1.
 
 ## The verbs
 
@@ -126,7 +126,33 @@ Five organs, one tuner.
   logging every shed. Snippet filenames carry the watch id and the
   bill item id, so two dwells can never produce the same path; a
   snippet refused by a cap or the ceiling files a refusal event
-  with the reason. Rebuilding the database from the logs preserves
+  with the reason. Since 0.4.1 the snippet store sits inside a
+  reception budget: at bill build, every planned reception
+  carries a computed allocation - tuner seconds and worst-case
+  bytes from its capture rate and duration, satellite passes
+  from their predicted AOS-to-LOS windows (an APT pass reserves
+  its stored-audio rate of 22,050 bytes per second of window
+  plus an image allowance; an LRPT pass reserves 2,048,000
+  bytes per second of window plus an image allowance). At
+  muster the officer sums the bill into a ReceptionBudget
+  against the profile's disk ceiling - per-class and per-desk
+  allocations, the satellite reserve, and a free margin (the
+  degradation below defends at least five percent of the
+  ceiling as margin) - and states it. If the worst case
+  cannot fit, muster degrades the budget in a stated order
+  (event-allowance classes first, satellite reservations last)
+  and says so in the muster events, rather than discovering the
+  wall mid-watch. During the watch, kept evidence is accounted
+  live against the allocations in the watch state, a capture
+  that reaches its allocation stops at the boundary with the
+  truncation stated in its event (the LRPT IQ capture is the
+  first citizen of this rule), and shedding still runs oldest
+  first, each shed logged with the desk, bill item, and bytes it
+  came from. The Watch Report carries the reception account -
+  allocated against kept against shed, per class - beside the
+  coverage account, and `doctor` reports the budget's shape for
+  the profile before any watch stands. Rebuilding the database
+  from the logs preserves
   the snippet accounting, the event links, and the watch metadata,
   which the logs themselves do not record. Whether a desk is
   benched is computed once, from the capability, muster, and
@@ -167,18 +193,29 @@ in the same window the moderate gain heard nothing.
 Tier 2 is implemented where pure Python honestly carries it and
 benched with the reason where it does not. Satellite pass prediction
 runs from TLE with a simplified two-body propagator and is graded
-PROBABLE wherever it appears. On a lock, a pass is recorded whole -
-the real source for the whole remaining pass at maximum tuner gain,
-stored at 11025 Hz, the simulated source as a synthetic recording
-shaped to the published APT line format - and the recording is
-filed as the pass evidence. When aptdec is staged on the host, the
+PROBABLE wherever it appears. On a lock, a NOAA pass is recorded
+whole - the real source for the whole remaining pass at maximum
+tuner gain, stored at 11025 Hz, the simulated source as a
+synthetic recording shaped to the published APT line format -
+and the recording is filed as the pass evidence. When aptdec is staged on the host, the
 satellite desk decodes a NOAA pass recording into APT imagery,
 files the image with the pass event, and names it in the event and
 its FLASH; when aptdec is not staged, the pass states that its
-imagery was not decoded, with the reason. METEOR-M2 4 flies an
-LRPT digital downlink: its passes are recorded the same way, and
-their imagery is stated as not applicable for LRPT in this build.
-Radiosonde windows are scheduled from
+imagery was not decoded, with the reason. METEOR satellites fly
+an LRPT digital downlink (72 ksym/s QPSK family in about
+140 kHz): on a lock the real source records raw IQ for the whole
+remaining pass at 1,024,000 samples per second in the dongle's
+native unsigned 8-bit format - 2 bytes per complex sample, so
+2,048,000 bytes per second of pass - and the recording is filed
+as the pass evidence. When SatDump is staged on the host, the
+recorded IQ is decoded after the pass, outside the dwell, into
+imagery that files with a following imagery event and is named
+in its FLASH, the same discipline as APT; when SatDump is not
+staged, the pass files its IQ and states that LRPT imagery was
+not decoded because satdump is not staged. The simulated source
+produces a synthetic LRPT-shaped IQ fixture for a locked METEOR
+pass, labelled synthetic wherever it appears. Radiosonde
+windows are scheduled from
 configured sites and synoptic hours; against the real source the
 sonde desk files a presence census of carriers in the sonde band
 and states that telemetry is not decoded, because an RS41-class

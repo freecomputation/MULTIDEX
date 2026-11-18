@@ -387,9 +387,15 @@ class Index:
             data={"snippet_refused": filename, "snippet_kind": kind,
                   "bytes": size, "reason": reason}))
 
-    def keep_snippet(self, watch_id, watch_dir, desk, kind, filename, data,
-                     ceiling_bytes, count_cap=None, t=None):
+    def keep_snippet(self, watch_id, watch_dir, desk, kind, filename,
+                     data=None, ceiling_bytes=0, count_cap=None, t=None,
+                     source_path=None):
         """Write a snippet under quota and ceiling. Returns (path, shed).
+
+        The payload is either bytes (`data`) or a file to copy in
+        (`source_path`, for captures too large to hold in memory -
+        an LRPT pass recording is hundreds of megabytes); the
+        accounting is identical either way, from the byte size.
 
         Sheds oldest current-watch snippets (satellite imagery last)
         when the ceiling demands it; every shed is reported so the
@@ -403,6 +409,10 @@ class Index:
         import time as _time
         if t is None:
             t = _time.time()
+        if source_path is not None:
+            size = os.path.getsize(source_path)
+        else:
+            size = len(data)
         snip_dir = os.path.join(watch_dir, "snippets")
         os.makedirs(snip_dir, exist_ok=True)
         rel = os.path.join("snippets", filename)
@@ -415,11 +425,11 @@ class Index:
             if row["n"] >= count_cap:
                 self.db.commit()
                 self._record_snippet_refusal(
-                    watch_id, desk, kind, filename, len(data),
+                    watch_id, desk, kind, filename, size,
                     "the per-desk snippet count cap is reached", t)
                 return None, shed
         total = self._snippet_bytes(watch_id)
-        while total + len(data) > ceiling_bytes:
+        while total + size > ceiling_bytes:
             victim = self.db.execute(
                 "SELECT * FROM snippets WHERE watch_id=? AND shed=0 "
                 "ORDER BY (kind='satellite') ASC, t ASC LIMIT 1",
@@ -427,7 +437,7 @@ class Index:
             if victim is None:
                 self.db.commit()
                 self._record_snippet_refusal(
-                    watch_id, desk, kind, filename, len(data),
+                    watch_id, desk, kind, filename, size,
                     "the snippet does not fit the disk ceiling", t)
                 return None, shed
             try:
@@ -448,15 +458,30 @@ class Index:
             self.db.execute("UPDATE snippets SET shed=1 WHERE id=?",
                             (existing["id"],))
             shed.append(dict(existing))
-        with open(os.path.join(watch_dir, rel), "wb") as fh:
-            fh.write(data)
+        if source_path is not None:
+            import shutil as _shutil
+            _shutil.copyfile(source_path,
+                             os.path.join(watch_dir, rel))
+        else:
+            with open(os.path.join(watch_dir, rel), "wb") as fh:
+                fh.write(data)
         from . import util as _util
         self.db.execute(
             "INSERT INTO snippets VALUES (?,?,?,?,?,?,?,?)",
-            (_util.new_id("sn"), watch_id, desk, kind, rel, len(data), 0,
+            (_util.new_id("sn"), watch_id, desk, kind, rel, size, 0,
              t))
         self.db.commit()
         return rel, shed
+
+    def snippet_rows(self, watch_id):
+        """Every snippet row for a watch, kept and shed: the raw
+        material of the reception account (the budget ledger is
+        derived from these rows, so it survives an Index rebuild
+        exactly as the rows do)."""
+        rows = self.db.execute(
+            "SELECT desk, kind, path, bytes, shed, t FROM snippets "
+            "WHERE watch_id=? ORDER BY t ASC", (watch_id,)).fetchall()
+        return [dict(r) for r in rows]
 
     def _snippet_bytes(self, watch_id):
         row = self.db.execute(
