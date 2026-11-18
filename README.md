@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.8.0.
+Version 0.10.0.
 
 ## The verbs
 
@@ -137,10 +137,11 @@ Five organs, one tuner.
   dossiers; aliases (an aircraft's ICAO address, tail number, and
   flight callsign) resolve to one dossier across desks. A snippet
   store keeps bounded audio and imagery evidence under per-desk
-  quotas and the profile's disk ceiling, shedding oldest first and
-  logging every shed, with one exemption: payload-class evidence
-  (the digital voice desk's vocoder frame archives) is permanent
-  and is never shed. Snippet filenames carry the watch id and the
+  quotas and the profile's disk ceiling, shedding by retention
+  tier and value under the tier law in the retention section
+  below, and logging every shed; payload-class evidence (the
+  digital voice desk's vocoder frame archives) sits in the
+  permanent tier and is never shed. Snippet filenames carry the watch id and the
   bill item id, so two dwells can never produce the same path; a
   snippet refused by a cap or the ceiling files a refusal event
   with the reason. Since 0.4.2 the snippet store sits inside a
@@ -181,9 +182,10 @@ Five organs, one tuner.
   watch reconciles its grants against the ledger and the
   snippet store rather than assuming they survived, and files
   what changed. Shedding under the ceiling reads the whole
-  home - the oldest filed receptions anywhere are the
-  candidates, satellite imagery last - and every shed names
-  the grant it was filed under. The Watch Report carries the
+  home - the lowest tier's least valuable receptions anywhere
+  are the candidates, and a decoded satellite image outlives
+  the pass audio it was decoded from - and every shed names
+  the grant it was filed under and its tier. The Watch Report carries the
   reception account - this watch's slice of the standing
   ledger: granted against kept against released against shed,
   per class, with the payload-class evidence it holds and its
@@ -207,6 +209,55 @@ Every claim carries one of three grades, enforced at write time:
 CONFIRMED (decoded from the emission itself), PROBABLE (inferred from
 a stated model), UNRESOLVED (detected, not characterized). Baselines
 are provisional until three watches have contributed.
+
+## Retention: evidence in tiers
+
+Raw capture is the expensive artifact and the least informative one.
+A tuner running at 1.024 megasamples per second in 8-bit I/Q writes
+about 2.05 megabytes per second, so a 20 gigabyte pool holds about
+2.7 hours of it; the same pool holds the derived record of far more
+watching, because what a capture means is small next to the capture.
+The snippet store therefore keeps evidence in tiers, and shedding
+follows the tiers. The rate figures are arithmetic from the capture
+rates, stated as the expectation the design runs on; no retention
+multiplier is claimed as measured until a real watch measures one.
+
+- Tier 0 is permanent and never shed: decoded payloads, including
+  the digital voice desk's vocoder frame archives, and with them
+  the event records themselves, which are the watch's permanent
+  account and are not snippets at all.
+- Tier 1 is permanent: the derived products of captures - each
+  dwell's spectrum summary, the band state it records, and imagery
+  decoded from a capture. These are small and bounded by
+  construction, and they shed only when no tier 2 or tier 3
+  material remains anywhere in the home.
+- Tier 2 is selective: decimated channel IQ excerpts in SigMF, a
+  data file and its JSON metadata written by the package itself.
+  An excerpt is retained around a graded detection - the audio
+  census files one for an emission it extracted but could not
+  classify, and the sweep desk files one for a strong unknown
+  emission - sized in seconds around the event, so that a later
+  classifier or decoder has the channel itself to work on. The
+  unclassified excerpts are the probe desk's future candidates.
+- Tier 3 is evicted first: full-rate and decode-input material
+  retained only where a desk has a present reason - a satellite
+  pass's stored audio, kept because the decoder consumes it after
+  the pass, while the image decoded from it is retained at tier 1.
+
+Inside a tier, shedding is value-aware: an excerpt or recording
+whose emitter's dossier holds few events outranks one from an
+emitter heard constantly, an UNRESOLVED detection outranks a
+CONFIRMED one, and where a classification exists the less certain
+classification outranks the more certain one; age breaks ties only.
+Tier order dominates value: a low-value tier 2 excerpt sheds before
+any tier 1 product, and tier 0 never sheds. A SigMF excerpt's data
+and metadata files shed together or not at all. Sealed captures -
+a case's frozen raw capture and context, held under the anomaly
+doctrine - stand outside the tiers entirely: never shed, never
+evicted, and accounted apart in every surface. Status, `doctor`,
+and the Watch Report state the pool by tier - held per tier, shed
+per tier, sealed apart - and a watch's slice of the ledger shows
+its tier composition.
 
 ## Desk roster
 

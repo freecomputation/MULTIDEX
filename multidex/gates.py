@@ -239,6 +239,32 @@ def doctor_text(profile, home):
     except Exception as exc:
         lines.append("Reception pool: could not be read "
                      "(%s: %s)" % (type(exc).__name__, exc))
+    # The retention law (0.10.0): the tier policy stated once,
+    # plainly, and this home's evidence accounted by tier from
+    # the snippet store when the home has one.
+    from . import retention as _retention
+    lines.append("Retention: %s" % _retention.POLICY)
+    try:
+        import os as _os
+        if _os.path.exists(_os.path.join(home, "index.sqlite")):
+            from .index import Index as _Index
+            _idx = _Index(home)
+            try:
+                _acct = _retention.account(_idx.snippet_rows_all())
+            finally:
+                _idx.close()
+            lines.append("Evidence by tier in this home: "
+                         + "; ".join(
+                             "tier %d (%s) %d bytes held, %d shed"
+                             % (_t, _retention.TIER_NAMES[_t],
+                                _acct[_t]["kept_bytes"],
+                                _acct[_t]["shed_bytes"])
+                             for _t in (0, 1, 2, 3))
+                         + "; sealed %d bytes held apart, never shed."
+                         % _acct["sealed"]["bytes"])
+    except Exception as exc:
+        lines.append("Evidence by tier: could not be read "
+                     "(%s: %s)" % (type(exc).__name__, exc))
     from . import updater as _updater
     lines.extend(_updater.doctor_lines(home, profile))
     return "\n".join(lines)

@@ -75,13 +75,27 @@ The arithmetic the grants stand on is unchanged from 0.4.1:
   rate for the whole dwell - the honest worst case, a dwell
   that never stops talking. Desks that file only event records
   are charged a flat per-item event allowance.
+
+What the grants buy is organized by the retention tiers
+(0.10.0, multidex.retention): the pool's consumed bytes are
+evidence held in tiers - tier 0 permanent, tier 1 derived
+products, tier 2 selective excerpts, tier 3 bulk capture
+material - and shedding under the ceiling chooses by tier
+and by value inside a tier, not by age alone. The ledger's
+own law does not change: grants are byte accounts and do not
+denominate evidence classes, so a watch's slice states its
+tier composition from the snippet rows filed under its
+grants, joined the way reconcile_watch already joins them.
+Sealed captures stand outside the tiers and are stated
+apart in every account; their bytes are part of the pool's
+consumed figure, as all held evidence is.
 """
 
 import os
 import shutil
 import time
 
-from . import util
+from . import retention, util
 
 # ------------------------------------------------------------- rates
 
@@ -556,11 +570,16 @@ class AllocationLedger:
         return expired
 
 
-def watch_slice(ledger, watch_id):
+def watch_slice(ledger, watch_id, rows=None):
     """One watch's slice of the standing ledger: the grants it
     holds and held, summed - granted, consumed, released, shed,
     in total and per class. The Watch Report's reception account
-    is drawn from this."""
+    is drawn from this. When the watch's snippet rows are given,
+    the slice also states its tier composition (by_tier: kept
+    and shed bytes per retention tier) and its sealed bytes,
+    apart from the tiers - the grants are byte accounts, so
+    the composition is read from the evidence filed under
+    them."""
     grants = ledger.select(owner=watch_id)
     out = {"grants": grants,
            "granted_bytes": sum(g["bytes"] for g in grants),
@@ -578,6 +597,16 @@ def watch_slice(ledger, watch_id):
         cls["consumed"] += grant["consumed_bytes"]
         cls["released"] += grant["released_bytes"]
         cls["shed"] += grant["shed_bytes"]
+    if rows is not None:
+        acct = retention.account(rows)
+        out["by_tier"] = {
+            tier: {"kept_bytes": acct[tier]["kept_bytes"],
+                   "kept_count": acct[tier]["kept_count"],
+                   "shed_bytes": acct[tier]["shed_bytes"],
+                   "shed_count": acct[tier]["shed_count"]}
+            for tier in (0, 1, 2, 3)}
+        out["sealed_bytes"] = acct["sealed"]["bytes"]
+        out["sealed_count"] = acct["sealed"]["count"]
     return out
 
 

@@ -17,8 +17,8 @@ import subprocess
 import threading
 import time
 
-from . import budget, displayfeed, gates, orbit, products, updater, \
-    util
+from . import budget, displayfeed, gates, orbit, products, retention, \
+    updater, util
 from .bands import band_name
 from .channelizer import plan as channel_plan
 from .desks import SPECS, bench_reasons, channels_for, desk_state
@@ -274,6 +274,9 @@ class WatchRunner:
         self._held_by_desk = {}
         self._held_total = 0
         self._shed_total = 0
+        self._tier_held = {0: 0, 1: 0, 2: 0, 3: 0}
+        self._tier_shed = {0: 0, 1: 0, 2: 0, 3: 0}
+        self._sealed_held = 0
         # Live updates (0.7.0): this officer's generation, read
         # from its own tree at startup and never from the
         # pointer; the handover state the boundary hook sets
@@ -830,10 +833,22 @@ class WatchRunner:
         self._held_by_desk = {}
         self._held_total = 0
         self._shed_total = 0
+        self._tier_held = {0: 0, 1: 0, 2: 0, 3: 0}
+        self._tier_shed = {0: 0, 1: 0, 2: 0, 3: 0}
+        self._sealed_held = 0
         for row in self.index.snippet_rows(self.watch_id):
             if row["shed"]:
                 self._shed_total += row["bytes"]
+                self._tier_shed[row["tier"]] = \
+                    self._tier_shed.get(row["tier"], 0) + row["bytes"]
                 continue
+            if row.get("sealed"):
+                # Sealed captures stand outside the tiers in
+                # every account, this one included.
+                self._sealed_held += row["bytes"]
+            else:
+                self._tier_held[row["tier"]] = \
+                    self._tier_held.get(row["tier"], 0) + row["bytes"]
             bid = budget.bill_id_of_snippet_path(row["path"])
             if bid:
                 self._held[bid] = self._held.get(bid, 0) + row["bytes"]
@@ -898,6 +913,11 @@ class WatchRunner:
             "watch_granted_bytes": sl["granted_bytes"],
             "watch_consumed_bytes": self._held_total,
             "watch_released_bytes": sl["released_bytes"],
+            "by_tier": {str(t): {
+                "held": self._tier_held.get(t, 0),
+                "shed": self._tier_shed.get(t, 0)}
+                for t in (0, 1, 2, 3)},
+            "sealed_bytes": self._sealed_held,
             "by_class": by_class,
             "degraded": bool(self._grant_statements),
         }
@@ -1212,7 +1232,7 @@ class WatchRunner:
                         self.display.work(t1, desk_name, line)
                 self._publish_display_frame(item, feeds, new_events,
                                             t1)
-        self.index.add_event(make_event(
+        dwell_ev = make_event(
             self.watch_id, "officer", "dwell", t0, t1,
             freq_hz=item["center_hz"], grade="CONFIRMED",
             content="%s: %s" % (item["label"], ", ".join(
@@ -1224,11 +1244,46 @@ class WatchRunner:
                   "dropped": dropped,
                   "generation": self.generation,
                   "planned_start": planned_start,
-                  "planned_end": planned_start + item["dur"]}))
+                  "planned_end": planned_start + item["dur"]})
+        self._file_spectrum(item, feeds, dwell_ev, t0)
+        self.index.add_event(dwell_ev)
         for ev in self.exploit.process(self.watch_id, new_events,
                                        pre_counts=pre_counts):
             self._file(ev)
         self._maybe_interrupt(item, new_events, watch_start)
+
+    def _file_spectrum(self, item, feeds, dwell_ev, t0):
+        """File this dwell's spectrum product as tier 1 evidence
+        (0.10.0): the same display projection the Console's
+        waterfall reads - the sweep scan's own power array on a
+        sweep item, otherwise the audio census slice's PSD - kept
+        in the snippet store under the dwell event as the dwell's
+        band state, permanently. It is a few kilobytes by
+        construction and files under the item's own grant. A
+        capture that produced neither files nothing, as the
+        waterfall holds its last frame."""
+        import base64 as _b64
+        import json as _json
+        disp = None
+        desk = None
+        if item["kind"] == "sweep":
+            disp = (feeds.get("sweep") or {}).get("display")
+            desk = "sweep"
+        if disp is None:
+            disp = (feeds.get("audiocensus") or {}).get("display")
+            desk = "audiocensus"
+        if not disp:
+            return
+        record = {"desk": desk, "lo_hz": disp["lo_hz"],
+                  "hi_hz": disp["hi_hz"],
+                  "floor_db": disp.get("floor_db"),
+                  "bins": disp["bins"], "t": t0}
+        payload = {"filename": "spectrum-%d.json" % int(t0),
+                   "kind": "spectrum",
+                   "b64": _b64.b64encode(_json.dumps(
+                       record, sort_keys=True).encode(
+                       "utf-8")).decode("ascii")}
+        self._file_snippet(dwell_ev, desk, item["id"], payload)
 
     def _publish_display_frame(self, item, feeds, events, t1):
         """One capture's spectrum frame for the Console (0.8.0).
@@ -1353,6 +1408,13 @@ class WatchRunner:
                     vwatch, vbid, victim["bytes"])
             if vwatch == self.watch_id:
                 self._held_shed(victim)
+                vtier = retention.tier_of(victim["kind"],
+                                          victim["path"])
+                self._tier_shed[vtier] = \
+                    self._tier_shed.get(vtier, 0) + victim["bytes"]
+                self._tier_held[vtier] = max(
+                    0, self._tier_held.get(vtier, 0)
+                    - victim["bytes"])
             self.index.add_event(make_event(
                 self.watch_id, "officer", "system", ev["t_start"],
                 ev["t_end"], grade="CONFIRMED",
@@ -1367,6 +1429,9 @@ class WatchRunner:
         if rel:
             ev["snippet"] = rel
             self._held_add(bill_id, desk, size)
+            tier = retention.tier_of(payload["kind"], filename)
+            self._tier_held[tier] = \
+                self._tier_held.get(tier, 0) + size
             if self.ledger is not None:
                 grant = self.grants.get(bill_id)
                 if grant is not None:
@@ -1403,7 +1468,10 @@ class WatchRunner:
         if not ev["data"].pop("transcribe_candidate", False):
             return
         rel = ev.get("snippet")
-        if not rel:
+        if not rel or not rel.endswith(".wav"):
+            # The candidate's headline snippet is its voice
+            # audio; anything else in that slot (a SigMF excerpt
+            # filed where no audio was) is not transcribable.
             return
         self._tx_queue.submit({
             "snippet": os.path.join(self.watch_dir, rel),

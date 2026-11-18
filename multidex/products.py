@@ -403,6 +403,25 @@ def render_report(index, watch_id):
             for statement in rb.get("degraded") or []:
                 L.append("The reception budget was degraded at "
                          "muster: %s" % statement)
+    # The tier account (0.10.0): what this watch's evidence is
+    # made of, by retention tier - held and shed per tier, and
+    # sealed evidence apart, as the snippet store recorded it.
+    from . import retention as _retention
+    _acct = _retention.account(index.snippet_rows(watch_id))
+    if any(_acct[_t]["kept_bytes"] or _acct[_t]["shed_bytes"]
+           for _t in (0, 1, 2, 3)) or _acct["sealed"]["bytes"]:
+        for _t in (0, 1, 2, 3):
+            _g = _acct[_t]
+            L.append("Tier %d (%s): %d bytes kept in %d files; "
+                     "%d bytes shed in %d files."
+                     % (_t, _retention.TIER_NAMES[_t],
+                        _g["kept_bytes"], _g["kept_count"],
+                        _g["shed_bytes"], _g["shed_count"]))
+        if _acct["sealed"]["bytes"]:
+            L.append("Sealed evidence stands apart from the "
+                     "tiers: %d bytes in %d files, never shed."
+                     % (_acct["sealed"]["bytes"],
+                        _acct["sealed"]["count"]))
     L.append("")
     L.append("## 3. Day picture, service by service")
     for desk in sorted(picture["by_desk"]):
@@ -766,6 +785,16 @@ def status_text(home):
                         bstate["shed_bytes"],
                         bstate["satellite_reserve_bytes"],
                         bstate["satellite_consumed_bytes"]))
+    if bstate and bstate.get("by_tier"):
+        bt = bstate["by_tier"]
+        lines.append("Retention by tier: " + "; ".join(
+            "tier %s held %d bytes, shed %d bytes"
+            % (t, bt[t]["held"], bt[t]["shed"])
+            for t in sorted(bt, key=int)) + ".")
+        if bstate.get("sealed_bytes"):
+            lines.append("Sealed evidence stands apart from the "
+                         "tiers: %d bytes held, never shed."
+                         % bstate["sealed_bytes"])
     return "\n".join(lines)
 
 
