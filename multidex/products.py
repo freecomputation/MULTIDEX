@@ -435,6 +435,55 @@ def render_report(index, watch_id):
                      "tiers: %d bytes in %d files, never shed."
                      % (_acct["sealed"]["bytes"],
                         _acct["sealed"]["count"]))
+    # The retroactive account (0.12.0): the passes this watch
+    # ran over the archive, aggregated from the summary events
+    # they filed, and the debt still standing in the home when
+    # the report renders. Retroactive finds themselves are
+    # filed under the watches that filed the captures; this
+    # chapter accounts for the work, and the Index holds the
+    # finds.
+    _retro_evs = [e for e in index.events(
+        watch_id=watch_id, kinds=["system"], limit=100000)
+        if (e.get("data") or {}).get("retroactive_account")]
+    _owed = {}
+    try:
+        from . import retro as _retro_mod
+        _owed = _retro_mod.owed_counts(index)
+    except Exception:
+        _owed = {}
+    if _retro_evs or _owed:
+        _examined = sum(e["data"]["retroactive_account"]["examined"]
+                        for e in _retro_evs)
+        _found = sum(e["data"]["retroactive_account"]["found"]
+                     for e in _retro_evs)
+        _seeded = sum(e["data"].get("retro_seeded", 0)
+                      for e in _retro_evs)
+        L.append("Retroactive account: this watch's passes "
+                 "re-examined %d retained captures and filed %d "
+                 "retroactive events from them; %d captures were "
+                 "seeded as already exploited, their decoder's "
+                 "product already standing in the record."
+                 % (_examined, _found, _seeded))
+        _per = {}
+        for e in _retro_evs:
+            for _name, _cell in (e["data"]["retroactive_account"]
+                                 .get("per_decoder") or {}).items():
+                _agg = _per.setdefault(_name, {"examined": 0,
+                                               "found": 0})
+                _agg["examined"] += _cell["examined"]
+                _agg["found"] += _cell["found"]
+        for _name in sorted(_per):
+            L.append("Decoder %s: %d captures examined, %d "
+                     "retroactive events filed."
+                     % (_name, _per[_name]["examined"],
+                        _per[_name]["found"]))
+        if _owed:
+            L.append("Retroactive debt still standing in this "
+                     "home: %s. The debt carries to the next "
+                     "watch; it is a property of the archive, "
+                     "not of this watch."
+                     % ", ".join("%s %d" % (n, _owed[n])
+                                 for n in sorted(_owed)))
     L.append("")
     L.append("## 3. Day picture, service by service")
     for desk in sorted(picture["by_desk"]):
@@ -744,15 +793,16 @@ def status_text(home):
         # The standing pool is reported either way: it is a
         # property of the home, not of a run.
         pool_line = _pool_line(home)
+        retro_line = _retro_line(home)
+        extra = "".join("\n" + line for line in
+                        (pool_line, retro_line) if line)
         if pointer:
             state = _watch_state(home, pointer)
             if state and state.get("complete"):
                 text = ("No watch is running. Last watch %s "
                         "completed." % pointer)
-                return text + ("\n" + pool_line if pool_line
-                               else "")
-        return "No watch is running." + (
-            "\n" + pool_line if pool_line else "")
+                return text + extra
+        return "No watch is running." + extra
     index = Index(home)
     try:
         state = util.read_json(os.path.join(
@@ -815,7 +865,45 @@ def status_text(home):
             lines.append("Sealed evidence stands apart from the "
                          "tiers: %d bytes held, never shed."
                          % bstate["sealed_bytes"])
+    if state.get("retro_owed"):
+        lines.append("Retroactive exploitation: %d retained "
+                     "captures stand owed to a decoder whose "
+                     "current version has not examined them; "
+                     "the watch's passes work the debt down "
+                     "inside its per-watch budget, and what "
+                     "they do not reach carries to the next "
+                     "watch." % state["retro_owed"])
     return "\n".join(lines)
+
+
+def _retro_line(home):
+    """The retroactive debt as one status line, computed from
+    the home's store and processed ledger as they stand: the
+    debt is a property of the archive, not of a run. None
+    when the home has no Index yet, or nothing is owed."""
+    try:
+        import os as _os
+        if not _os.path.exists(_os.path.join(home, "index.sqlite")):
+            return None
+        from . import retro as _retro_mod
+        from .index import Index as _Index
+        index = _Index(home)
+        try:
+            owed = _retro_mod.owed_counts(index)
+        finally:
+            index.close()
+    except Exception:
+        return None
+    if not owed:
+        return None
+    return ("Retroactive exploitation: %d retained captures "
+            "stand owed to a decoder whose current version has "
+            "not examined them (%s); the next watch's passes "
+            "work the debt down, and the reprocess verb runs "
+            "it off now."
+            % (sum(owed.values()),
+               ", ".join("%s %d" % (n, owed[n])
+                         for n in sorted(owed))))
 
 
 def _pool_line(home):
