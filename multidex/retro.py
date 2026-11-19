@@ -732,79 +732,13 @@ def _classifier_already(ev):
     return bool((ev.get("data") or {}).get("classification"))
 
 
-def _resample_fft(samples, rate_in, rate_out):
-    """FFT resampling, the census demodulator's own method:
-    truncate or zero-pad the spectrum at the new rate."""
-    import numpy as np
-    n_out = int(len(samples) * rate_out / rate_in)
-    if n_out <= 0:
-        return samples
-    spec = np.fft.rfft(samples)
-    out_spec = np.zeros(n_out // 2 + 1, dtype=complex)
-    m = min(len(spec), len(out_spec))
-    out_spec[:m] = spec[:m]
-    return np.fft.irfft(out_spec, n_out)
-
-
-def _am_demod(chan, rate):
-    """AM-demodulate a baseband channel excerpt to audio at
-    12000 Hz, the rate the ACARS frame layer works at. The
-    envelope is taken against a local carrier baseline - a
-    moving average spanning ten cycles of the 1200 Hz tone,
-    so the tones themselves average out of it - and the
-    baseline is subtracted, which leaves silence quiet, as
-    the rtl_fm audio the tuner feeds the frame layer is
-    quiet in silence. A single global mean, the census
-    demodulator's way, leaves a baseline step at a burst's
-    edges that biases the frame layer's per-bit tone
-    decisions across the whole burst."""
-    import numpy as np
-    env = np.abs(chan)
-    w = max(8, int(round(rate / 1200.0)) * 10)
-    pad = np.pad(env, w, mode="reflect")
-    base = np.convolve(pad, np.ones(w) / w, mode="same")[w:-w]
-    return _resample_fft(env - base, rate, 12000)
-
-
-def _acars_slices(audio):
-    """Burst slices of demodulated audio, segmented on the
-    envelope in the tuner's own ACARS pattern: 5 ms
-    smoothing, activity at four times the median envelope,
-    gaps under a tenth of a second bridged, and slices kept
-    only past a tenth of a second of activity. The slice ends where the
-    activity ends, with no trailing margin: the frame
-    layer's parity gate reads a span of bytes from the
-    frame's start, and bytes trailed after a frame sink the
-    gate, so the tuner's discipline of ending the slice at
-    the burst's edge is load-bearing, not a courtesy. An
-    excerpt that is one burst wall to wall has no quiet
-    median to segment against and is taken whole."""
-    import numpy as np
-    env = np.abs(audio)
-    env = np.convolve(env, np.ones(60) / 60.0, mode="same")
-    floor = float(np.median(env)) + 1e-12
-    active = env > floor * 4.0
-    slices = []
-    i, n = 0, len(audio)
-    while i < n:
-        if active[i]:
-            j = i
-            while j < n and (active[j] or
-                             (j + 1200 < n and active[j + 1200])):
-                j += 1
-            if j - i > 1200:
-                slices.append(audio[i:j])
-            i = j
-        else:
-            i += 1
-    return slices or [audio]
-
-
 def _run_acars(ctx):
     """The ACARS physical layer over a retained channel
-    excerpt near an ACARS channel: AM demodulation against a
-    local carrier baseline, burst segmentation on the
-    envelope in the tuner's own pattern, and the frame
+    excerpt near an ACARS channel: the ACARS module's
+    conforming front end - AM demodulation against a local
+    carrier baseline, then activity-edge burst slices -
+    shared with the desk's live path and the probe desk's
+    attempt since 0.12.1, and the frame
     layer, which reports only parity- and CRC-verified
     frames. A frame files as a decode event in the ACARS
     desk's own shape; the same frame heard twice in one
@@ -819,12 +753,11 @@ def _run_acars(ctx):
                                for ch in _ACARS_CHANNELS):
         return []
     chan, rate = classifier_mod.decode_excerpt(_excerpt_dict(ctx))
-    audio = _am_demod(chan, rate)
+    audio = acars_mod.am_demod(chan, rate)
     raws = []
-    for burst in _acars_slices(audio):
-        for raw in acars_mod.decode_audio(burst, 12000):
-            if raw not in raws:
-                raws.append(raw)
+    for raw in acars_mod.decode_sliced(audio, whole_fallback=True):
+        if raw not in raws:
+            raws.append(raw)
     out = []
     for raw in raws:
         msg = codecs.acars_parse(raw)

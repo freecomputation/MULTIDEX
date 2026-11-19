@@ -97,7 +97,7 @@ def _seed_hearing(index, t, freq_hz, snr_db=38.0, emitter=None,
 # ------------------------------------------------------- surfaces
 
 def test_version_and_roster(profile):
-    assert __version__ == "0.12.0"
+    assert __version__ == "0.12.1"
     assert "probe" in desks.SPECS
     assert "probe" in desks.PROCESS
     from multidex import applicability

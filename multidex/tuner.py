@@ -1047,11 +1047,14 @@ class RealSource:
         return seg
 
     def _feed_acars(self, vfos, center_hz, bw_hz, t0, t1):
-        """ACARS on the real source: AM audio at 131.55 MHz, burst
-        segmentation on the envelope, and the pure-Python ARINC
-        618 decoder (multidex.acars). The capture is bounded at
-        90 s of the datalink dwell; only CRC-verified frames are
-        reported, as normalised ACARS text."""
+        """ACARS on the real source: AM audio at 131.55 MHz,
+        burst slices from the ACARS module's conforming front
+        end (multidex.acars.burst_slices: envelope segmentation
+        ending each slice at the activity edge), and the
+        pure-Python ARINC 618 decoder (multidex.acars). The
+        capture is bounded at 90 s of the datalink dwell; only
+        CRC-verified frames are reported, as normalised ACARS
+        text."""
         import numpy as np
         from . import acars as acars_mod
         freq = vfos[0]["freq_hz"] if vfos else 131.55e6
@@ -1060,27 +1063,9 @@ class RealSource:
             self._audio(freq, "am", 12000, seconds), dtype=float)
         if len(samples) < 12000:
             return {"messages": []}
-        env = np.abs(samples)
-        k = 60  # 5 ms smoothing at 12 ksps
-        env = np.convolve(env, np.ones(k) / k, mode="same")
-        floor = np.median(env) + 1e-9
-        active = env > floor * 4.0
         messages = []
-        i = 0
-        n = len(samples)
-        while i < n:
-            if active[i]:
-                j = i
-                while j < n and (active[j] or
-                                 (j + 1200 < n and active[j + 1200])):
-                    j += 1
-                burst = samples[max(0, i - 600):min(n, j + 600)]
-                if len(burst) > 2400:
-                    messages.extend(
-                        acars_mod.decode_audio(burst, 12000))
-                i = j
-            else:
-                i += 1
+        for burst in acars_mod.burst_slices(samples, 12000):
+            messages.extend(acars_mod.decode_audio(burst, 12000))
         return {"messages": messages}
 
     def _feed_milair(self, vfos, center_hz, bw_hz, t0, t1):
