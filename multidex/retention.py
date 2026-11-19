@@ -37,10 +37,9 @@ how replaceable it is.
 Sealed captures stand outside the tiers: a capture frozen
 under the anomaly doctrine is never a shed candidate, is
 filed even when nothing sheddable remains, and is accounted
-apart in every reception account. No desk seals captures in
-this build - the anomaly case machinery that will is a later
-build - but the store and the accounts carry the class now,
-so the doctrine has somewhere to land.
+apart in every reception account. Since 0.14.0 the anomaly
+register seals the retained evidence of every cluster it
+holds an entry for, so the class has a standing user.
 
 Shedding inside a tier is value-aware, not oldest-first:
 value rises with the emitter's uniqueness (an emitter heard

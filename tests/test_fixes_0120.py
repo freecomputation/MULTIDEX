@@ -97,7 +97,7 @@ def _magic_run(ctx):
 # ------------------------------------------------------------- surfaces
 
 def test_version_and_manifest():
-    assert __version__ == "0.13.0"
+    assert __version__ == "0.14.0"
     entries = retro.manifest()
     assert [e["name"] for e in entries] == [
         "apt-imagery", "excerpt-classifier", "acars-excerpt"]

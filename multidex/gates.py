@@ -312,6 +312,30 @@ def doctor_text(profile, home):
     except Exception as exc:
         lines.append("Retroactive account: could not be read "
                      "(%s: %s)" % (type(exc).__name__, exc))
+    # The anomaly register (0.14.0): its size by state and
+    # the sealed bytes its entries hold under the tiers,
+    # read from the Index when the home has one.
+    try:
+        import os as _os
+        if _os.path.exists(_os.path.join(home, "index.sqlite")):
+            from . import anomaly as _anomaly
+            from .index import Index as _Index
+            _idx = _Index(home)
+            try:
+                _acct = _anomaly.register_account(_idx)
+            finally:
+                _idx.close()
+            lines.append("Anomaly register: %d entries (%d "
+                         "open, %d standing as special "
+                         "candidates, %d resolved); %d bytes "
+                         "of registered evidence sealed under "
+                         "the retention tiers, never shed."
+                         % (_acct["entries"], _acct["open"],
+                            _acct["special"], _acct["resolved"],
+                            _acct["sealed_bytes"]))
+    except Exception as exc:
+        lines.append("Anomaly register: could not be read "
+                     "(%s: %s)" % (type(exc).__name__, exc))
     from . import updater as _updater
     lines.extend(_updater.doctor_lines(home, profile))
     return "\n".join(lines)
