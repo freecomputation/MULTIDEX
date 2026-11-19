@@ -40,6 +40,13 @@ MIN_HEIGHT = 22
 WATER_RAMP = " ▁▂▃▄▅▆▇█"
 WATER_SPAN_DB = 48.0     # the display window above the floor
 HELD_AFTER_S = 90.0      # a frame older than this reads HELD
+# The dense render (0.16.0): the newest frame's filled plot is
+# at most this many rows tall before further rows go to
+# history, and a history row's column is a braille bar filled
+# from the cell's floor in quarter-cell steps - both drawn
+# from the frame's full bins, never its brackets.
+PLOT_MAX_ROWS = 6
+BRAILLE_BARS = [" ", "⣀", "⣤", "⣶", "⣿"]
 
 BLOCK_MIN_W = 30
 BLOCK_ROWS = 3
@@ -188,38 +195,96 @@ def _header_rows(view, width, keepawake):
 
 # ----------------------------------------------------------- waterfall
 
-def _water_cells(frame, width):
-    """One spectrum frame as (glyph, attr) cells across width:
-    its bins max-pooled or stretched to the glass, its lock
-    brackets laid over the trace in their grade's colour with
-    the bracket's name written in place."""
+def _pooled(frame, width):
+    """A frame's bins at column resolution: max-pooled down to
+    the glass when the frame is wider, stretched by index when
+    it is narrower - the full bins, never the frame's lock
+    brackets, are what the waterfall draws (0.16.0)."""
     bins = frame["bins"]
     if len(bins) >= width:
-        pooled = displayfeed.pool_bins(bins, width)
-    else:
-        pooled = [bins[min(len(bins) - 1,
-                           int(i * len(bins) / width))]
-                  for i in range(width)]
+        return displayfeed.pool_bins(bins, width)
+    return [bins[min(len(bins) - 1, int(i * len(bins) / width))]
+            for i in range(width)]
+
+
+def _frame_floor(frame, pooled):
     floor = frame.get("floor_db")
-    if floor is None:
-        floor = min(pooled)
-    cells = []
-    for value in pooled:
-        level = int((value - floor) / WATER_SPAN_DB * 9)
-        level = max(0, min(8, level))
-        cells.append([WATER_RAMP[level], "water%d" % min(7, level)])
+    return min(pooled) if floor is None else floor
+
+
+def _bracket_cols(frame, width):
+    """A frame's lock brackets as (x0, x1, attr, label) column
+    spans against the frame's own span."""
     lo, hi = frame["lo_hz"], frame["hi_hz"]
     span = hi - lo
 
     def col(freq):
         return max(0, min(width - 1, int((freq - lo) / span * width)))
 
+    out = []
     for br in frame.get("brackets") or []:
-        attr = _grade_attr(br.get("grade"))
-        x0, x1 = col(br["lo_hz"]), col(br["hi_hz"])
+        out.append((col(br["lo_hz"]), col(br["hi_hz"]),
+                    _grade_attr(br.get("grade")),
+                    br.get("name") or br.get("desk") or ""))
+    return out
+
+
+def _spectrum_plot(frame, width, rows):
+    """The newest spectrum as a filled curve (0.16.0): the
+    frame's full bins at column resolution, each column a bar
+    filled from the plot's floor to the bin's level with
+    eighth-row resolution - a filled area under a curve, not a
+    row of isolated marks. Lock brackets tint the filled
+    columns inside their span in the grade's colour and name
+    themselves across the plot's top row."""
+    if rows <= 0:
+        return []
+    pooled = _pooled(frame, width)
+    floor = _frame_floor(frame, pooled)
+    total = rows * 8
+    heights = []
+    for value in pooled:
+        level = (value - floor) / WATER_SPAN_DB
+        heights.append(int(round(max(0.0, min(1.0, level))
+                                 * total)))
+    grid = []
+    for r in range(rows):
+        band = rows - 1 - r  # the row's eighth-band from the floor
+        cells = []
+        for x in range(width):
+            fill = max(0, min(8, heights[x] - band * 8))
+            top = (band * 8 + fill) / float(total)
+            cells.append([WATER_RAMP[fill],
+                          "water%d" % min(7, int(top * 8))])
+        grid.append(cells)
+    for x0, x1, attr, label in _bracket_cols(frame, width):
+        for cells in grid:
+            for x in range(x0, x1 + 1):
+                if cells[x][0] != " ":
+                    cells[x][1] = attr
+        for i, ch in enumerate(label[:width - x0]):
+            grid[0][x0 + i] = [ch, attr]
+    return [[(ch, attr) for ch, attr in cells] for cells in grid]
+
+
+def _history_cells(frame, width):
+    """One older frame as a single waterfall row (0.16.0): the
+    full bins at column resolution, each column a braille bar
+    filled from the cell's floor in quarter-cell steps, so the
+    history under the live plot drips as solid columns rather
+    than scattered marks. Its lock brackets are laid over in
+    their grade's colour with the bracket's name written in
+    place, as the waterfall has always named them."""
+    pooled = _pooled(frame, width)
+    floor = _frame_floor(frame, pooled)
+    cells = []
+    for value in pooled:
+        level = max(0.0, min(1.0, (value - floor) / WATER_SPAN_DB))
+        cells.append([BRAILLE_BARS[int(round(level * 4))],
+                      "water%d" % min(7, int(level * 8))])
+    for x0, x1, attr, label in _bracket_cols(frame, width):
         for x in range(x0, x1 + 1):
             cells[x][1] = attr
-        label = br.get("name") or br.get("desk") or ""
         for i, ch in enumerate(label[:width - x0]):
             cells[x0 + i] = [ch, attr]
     return [(ch, attr) for ch, attr in cells]
@@ -239,6 +304,12 @@ def _waterfall_rows(view, feed, width, height):
         state = "final capture - the watch is complete"
     elif age > HELD_AFTER_S:
         state = "HELD - last capture %s ago" % util.fmt_duration(age)
+        cur = view.get("current")
+        if cur:
+            # Held is a statement about the glass, not the
+            # tuner: while the panel holds, it says what the
+            # tuner is actually doing (0.16.0).
+            state += " - tuner on %s" % cur["label"]
     else:
         state = "last capture %s ago" % util.fmt_duration(age)
     title = "SPECTRUM - %s to %s" % (util.fmt_hz(newest["lo_hz"]),
@@ -247,10 +318,24 @@ def _waterfall_rows(view, feed, width, height):
                   (" " * max(1, width - len(title) - len(state)),
                    "normal"),
                   (state, "dim")], width)]
-    plot_rows = max(0, height - 2)
-    shown = spectra[-plot_rows:] if plot_rows else []
-    for frame in reversed(shown):
-        rows.append(_water_cells(frame, width))
+    # The panel's body (0.16.0): the newest frame as a filled
+    # plot, the frames behind it as braille history rows, in
+    # that priority - the plot takes its rows first (deepened
+    # by any the history cannot use), at least one history row
+    # stands whenever the feed holds one and the panel has the
+    # room, and the waterfall shows what the ring holds, never
+    # more.
+    body = max(0, height - 2)
+    hist_avail = len(spectra) - 1
+    plot = min(PLOT_MAX_ROWS, body)
+    hist = min(hist_avail, body - plot)
+    if hist == 0 and hist_avail and body >= 2:
+        plot -= 1
+        hist = 1
+    plot += body - plot - hist
+    rows.extend(_spectrum_plot(newest, width, plot))
+    for frame in reversed(spectra[-1 - hist:-1] if hist else []):
+        rows.append(_history_cells(frame, width))
     lo_label = util.fmt_hz(newest["lo_hz"])
     hi_label = util.fmt_hz(newest["hi_hz"])
     mid_label = util.fmt_hz((newest["lo_hz"] + newest["hi_hz"]) / 2)
@@ -560,16 +645,17 @@ def _allot(view, feed, width, height):
     waterfall first (it is the instrument's face), the pipeline
     to its full height, the feed and the mind stream to theirs,
     and the waterfall takes whatever remains. The waterfall's
-    growth is capped by the history it actually holds: a young
-    watch with two captures does not get forty rows of empty
-    glass while desks wait below."""
+    growth is capped by what it can draw: its filled plot's
+    rows plus the history the feed actually holds (0.16.0) - a
+    young watch with two captures does not get forty rows of
+    empty glass while desks wait below."""
     room = height - 5  # header 4, footer 1
     alloc = dict(_PANEL_MIN)
     for name in _DROP_ORDER:
         if sum(alloc.values()) <= room:
             break
         alloc[name] = 0
-    water_cap = 2 + max(1, len(feed["spectra"]))
+    water_cap = 2 + PLOT_MAX_ROWS + max(0, len(feed["spectra"]) - 1)
     surplus = room - sum(alloc.values())
     if surplus > 0 and alloc["waterfall"]:
         take = min(12, water_cap - alloc["waterfall"], surplus)

@@ -1364,8 +1364,9 @@ class WatchRunner:
         new_events = []
         heard = {}
         try:
-            feeds = self.tuner.capture(item["center_hz"], item["bw_hz"],
-                                       t0, t1, vfos)
+            feeds = self.tuner.capture(
+                item["center_hz"], item["bw_hz"], t0, t1, vfos,
+                stream=self._display_stream(item))
         except TunerLost as exc:
             self._file(make_event(
                 self.watch_id, "officer", "gap", t0, t1,
@@ -1579,6 +1580,35 @@ class WatchRunner:
                 t, self.profile["home"], self._sky_runtime))
         except Exception:
             pass
+
+    def _display_stream(self, item):
+        """The capture's live spectrum stream (0.16.0): a
+        callback the tuner source invokes with spectrum frames
+        while the capture runs, published straight into the
+        display feed under this item's context and with no
+        brackets - no desk has filed yet, so there is nothing
+        to bracket; the capture's final frame, published at
+        completion, carries them. None when the feed is off, in
+        which case the source does no streaming work at all.
+        Publishing rides the feed's own best-effort path, so a
+        frame that fails to publish is lost and never felt by
+        the watch - the stream observes the capture, it does
+        not drive it, and the event record is identical with
+        the stream running or not."""
+        if self.display is None or not self.display.enabled:
+            return None
+        display = self.display
+
+        def stream(frame):
+            display.spectrum({
+                "t": frame.get("t") or 0.0,
+                "bill_id": item["id"], "label": item["label"],
+                "kind": item["kind"],
+                "lo_hz": frame["lo_hz"], "hi_hz": frame["hi_hz"],
+                "floor_db": frame.get("floor_db"),
+                "bins": frame["bins"], "brackets": []})
+
+        return stream
 
     def _file_spectrum(self, item, feeds, dwell_ev, t0):
         """File this dwell's spectrum product as tier 1 evidence

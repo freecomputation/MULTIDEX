@@ -5,12 +5,25 @@ The Console is a viewer, and a viewer needs something published to
 view. The officer therefore keeps three small ring files inside
 the watch folder, beside the state file it already publishes:
 
-- display-spectra.jsonl: one frame per capture - a magnitude
-  spectrum computed from samples the watch already took for its
-  own work (the audio census desk's Welch PSD over its window
-  slice, or the sweep scan's own power array), downsampled to at
-  most MAX_BINS bins, with the span it covers and the lock
-  brackets the desks' events declared inside that span.
+- display-spectra.jsonl: magnitude spectrum frames computed
+  from samples the watch already took for its own work (the
+  audio census desk's Welch PSD over its window slice, or the
+  sweep scan's own power array), downsampled to at most
+  MAX_BINS bins, with the span each covers and the lock
+  brackets the desks' events declared inside that span. Since
+  0.16.0 the frames stream while a capture runs, not only when
+  it completes: the simulated source publishes a frame every
+  STREAM_CADENCE_S seconds of dwell time, and the real source
+  publishes at the points its capture path samples the window -
+  the scan's frame as the scan computes it, and one frame per
+  STREAM_BLOCK_S of the census slice, from the same Welch
+  segments the census itself averages. The officer still
+  publishes one final frame per capture, carrying the lock
+  brackets the desks filed. The ring stays MAX_SPECTRA frames
+  deep, so at streaming cadence the waterfall's history is
+  cadence-dependent by construction: inside one long dwell the
+  ring holds only that dwell's most recent frames, and the
+  waterfall shows what the ring holds, never more.
 - display-work.jsonl: each desk's real output as it happens, a
   few lines per desk per dwell, drawn from the events the desk
   itself produced.
@@ -53,6 +66,20 @@ MAX_THOUGHT = 240
 MAX_SKY = 240
 MAX_BINS = 240
 MAX_BRACKETS = 12
+
+# The display stream's cadence (0.16.0), bounded in both of its
+# forms. STREAM_CADENCE_S is the simulated source's spacing
+# between frames across a dwell: five seconds of dwell time,
+# fine enough that the Console's newest frame is seconds old
+# while a capture runs, coarse enough that a day of dwells
+# publishes thousands of small frames into a forty-frame ring,
+# never a flood. STREAM_BLOCK_S is the real source's spacing
+# inside a captured window slice: one frame per half-second of
+# sampled time, so the census desk's five-second slice yields
+# ten frames and a twenty-second probe stare forty - the ring's
+# whole depth, which is the stated trade of a stare that streams.
+STREAM_CADENCE_S = 5.0
+STREAM_BLOCK_S = 0.5
 WORK_LINE_CHARS = 200
 THOUGHT_LINE_CHARS = 300
 

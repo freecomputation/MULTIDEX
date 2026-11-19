@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.15.0.
+Version 0.16.0.
 
 ## The verbs
 
@@ -833,10 +833,16 @@ to the compact status rendering below an honest minimum size.
 The waterfall renders each capture's magnitude spectrum as it
 arrives, newest at the top, history dripping down and cooling,
 with lock brackets named in place where the desks' filings fall
-inside the span. It shows captures, never a fiction of
-continuity: between captures it holds the last true frame with
-its age stated, and a frame older than ninety seconds reads
-HELD. The pipeline shows the tuner, the channelizer and every
+inside the span. The newest spectrum draws as a filled curve
+from the frame's full bins at column resolution, with eighth-row
+resolution under the curve, and the history behind it drips as
+braille columns filled from each cell's floor (0.16.0) - the
+frames' lock brackets are an overlay, never the drawing. It
+shows captures, never a fiction of continuity: between captures
+it holds the last true frame with its age stated, a frame older
+than ninety seconds reads HELD, and a held panel says what the
+tuner is actually doing while it holds. The pipeline shows the
+tuner, the channelizer and every
 desk as blocks carrying their state and their real output as it
 files; a benched desk shows its bench reason, and an interrupt
 names the item it displaced. The mind stream is the officer's
@@ -848,19 +854,33 @@ frame with an honest benched statement until the astronomical
 patch brings its data.
 
 The officer publishes a bounded display feed for the Console
-inside the watch folder: one spectrum frame per capture
-(computed from samples the watch already took - the audio
-census desk's Welch spectrum or the sweep scan's power array,
-max-pooled to at most 240 bins), per-desk work lines, and the
-officer's thought lines, each ring capped so the whole feed
-stays well under a megabyte. The feed is not part of the
-watch's record, publishing is best-effort and can never reach
-the watch, and the profile's advanced `display_feed` key can
-turn it off, in which case the watch files an identical event
-record and the Console renders from state and Index alone. The
-Console itself is a pure viewer: it writes nothing to the
-watch, and quitting, resizing or killing it leaves the watch
-exactly as it was.
+inside the watch folder: spectrum frames (computed from samples
+the watch already took - the audio census desk's Welch spectrum
+or the sweep scan's power array, max-pooled to at most 240
+bins), per-desk work lines, and the officer's thought lines,
+each ring capped so the whole feed stays well under a megabyte.
+Since 0.16.0 the spectrum frames stream while a capture runs,
+not only when it completes: the simulated source publishes a
+frame every five seconds of dwell time, rendered from its world
+model at that instant, and the real source publishes at the
+points its capture path samples the window - the scan's frame
+as the scan computes it, and one frame per half-second of the
+census desk's window slice, read off the same Welch segments
+the census itself averages, so streaming adds no second
+transform and no capture of its own. One final frame per
+capture still lands at completion, carrying the lock brackets
+the desks filed. The spectra ring holds forty frames, so at
+streaming cadence the waterfall's history is cadence-dependent:
+inside one long dwell the ring turns over and holds only that
+dwell's most recent frames - a twenty-second probe stare can
+fill it alone - and the waterfall shows what the ring holds,
+never more. The feed is not part of the watch's record,
+publishing is best-effort and can never reach the watch, and
+the profile's advanced `display_feed` key can turn it off, in
+which case the watch files an identical event record and the
+Console renders from state and Index alone. The Console itself
+is a pure viewer: it writes nothing to the watch, and quitting,
+resizing or killing it leaves the watch exactly as it was.
 
 With `--keep-awake` (on `status --live` or `watch`) the
 Console holds the display awake while it runs and releases the
