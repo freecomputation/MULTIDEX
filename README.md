@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.12.1.
+Version 0.13.0.
 
 ## The verbs
 
@@ -56,8 +56,9 @@ anything it cannot get is a refusal with the reason in plain words.
   officer process is alive, stop says no watch is running and
   writes nothing.
 - `multidex ask <query>` - query the Index: an emitter identity, a
-  frequency such as `121.5 MHz`, a band such as `band uhf`, or a
-  service such as `adsb`.
+  frequency such as `121.5 MHz`, a band such as `band uhf`, a
+  service such as `adsb`, or `changes` for the most recent
+  watch's change log counts (see The change log, below).
 - `multidex update` - the live update system: `check` runs a
   fetch-verify-stage cycle now, `status` prints the update
   account, `approve` activates a staged candidate under the
@@ -424,6 +425,56 @@ store under the standing ceiling, as live products do; the
 pass draws no reception grant, because grants are taken at
 muster for planned receptions and a retroactive product is not
 a reception.
+
+## The change log
+
+The record is long enough now that the most valuable product is
+not another catch but the account of what changed. At stand-down
+the officer computes the change log from the Index alone and
+files it two ways: changelog.json in the watch folder, holding
+structured entries, and a Change Log chapter in the Watch Report
+rendering the same entries as prose. The ask verb answers
+`changes` with the most recent watch's counts, briefly. The
+JSON shape is stable and documented here so the REBER journal
+can carry it later: a format number, the watch id, the baseline
+account (the earlier watches it stands on, their count, and
+whether it is provisional), the thresholds the entries were
+computed under, per-kind counts, the entries themselves, and a
+separate unwatched list. Each entry names its kind, the emitter
+and its kind, the band, the frequencies and times and hearing
+counts the entry rests on, and an evidence note in plain words.
+
+Four change kinds are filed, each under a stated evidence rule.
+An emitter is new when its first-ever hearing in the Index
+falls inside the current watch and it is heard at least twice
+there; a single stray hearing is a catch, not an arrival. An
+emitter is vanished when it is established in the baseline -
+heard in at least two earlier watches, or holding at least five
+historical hearings - and is not heard at all in the current
+watch, and then only where the desks that hear it actually
+flew comparable coverage of its band during this watch. Where
+that coverage did not happen, no vanishing is claimed: the
+emitter is listed as unwatched, which is a coverage fact, not
+a change. An emitter has moved when the same emitter identity -
+the Index's own resolved identity, never two similar unknowns
+matched by resemblance - is heard at a frequency shifted past
+the greater of 25 kHz and a tenth of a percent of its baseline
+frequency, with frequency-carrying hearings on both sides. An
+emitter's rhythm has changed when its folded habit, judged by
+the probe desk's recurrence machinery over its full prior
+history against the current watch's hearings, materially
+moved: a daily habit appeared where none was established, an
+established daily habit dissolved, or the habit's centre
+shifted by more than two hours. No rhythm is claimed on fewer
+observations than the fold itself requires, on either side.
+
+The baseline is the record of every earlier watch in the
+Index. While fewer than three watches stand behind it, the
+whole account is headed provisional, in the JSON and in the
+prose alike, and it becomes established when the third earlier
+watch stands behind it. The change log is a pure Index
+computation: no tuner is touched, no desk changes, and the
+same Index always yields the same account.
 
 ## Desk roster
 

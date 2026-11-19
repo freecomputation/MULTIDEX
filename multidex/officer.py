@@ -2263,6 +2263,11 @@ class WatchRunner:
                 self.watch_id, end, watch_start):
             self._file(ev)
         self.exploit.build_baselines(self.watch_id)
+        # The change log (0.13.0) is part of the stand-down
+        # product set: computed from the Index and filed as
+        # changelog.json before the report renders its chapter
+        # from the same computation.
+        products.write_changelog(self.index, self.watch_id)
         text = products.render_report(self.index, self.watch_id)
         util.write_text(os.path.join(self.watch_dir, "REPORT.md"), text)
         self._file(make_event(

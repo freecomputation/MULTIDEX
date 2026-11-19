@@ -11,7 +11,7 @@ import glob
 import os
 import time
 
-from . import util
+from . import changelog, util
 from .bands import BANDS, band_name
 from .desks import SPECS, TRANSCRIPTION_REASON, transcription_state
 from .exploit import GRADE_ORDER, day_picture
@@ -216,6 +216,21 @@ def render_sitrep(index, watch_id, t_from, t_to, seq):
                  picture["alerts"], picture["assessments"]),
               ""]
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------- change log
+
+def write_changelog(index, watch_id):
+    """Compute the watch's change log and file it as
+    changelog.json in the watch folder (0.13.0). The officer
+    calls this at stand-down as part of the product set, after
+    the baselines fold and before the Watch Report renders, so
+    the report's chapter 5 and the filed data are one
+    computation. Returns the computed account."""
+    log = changelog.compute_changelog(index, watch_id)
+    util.write_json(os.path.join(index.watch_dir(watch_id),
+                                 "changelog.json"), log)
+    return log
 
 
 # ----------------------------------------------------------- Watch Report
@@ -505,7 +520,14 @@ def render_report(index, watch_id):
         for a in missing:
             L.append("- %s" % a["content"])
     L.append("")
-    L.append("## 5. Anomaly chapter")
+    # The change log (0.13.0): the same computation the officer
+    # files as changelog.json at stand-down, rendered here as
+    # the report's chapter 5. Pure Index computation, so the
+    # prose and the data cannot disagree.
+    L.extend(changelog.render_section(
+        changelog.compute_changelog(index, watch_id)))
+    L.append("")
+    L.append("## 6. Anomaly chapter")
     if assessments:
         for a in assessments:
             L.append("- %s [%s] %s (rule: %s; baseline: %s; evidence: "
@@ -516,7 +538,7 @@ def render_report(index, watch_id):
     else:
         L.append("No assessments were filed this watch.")
     L.append("")
-    L.append("## 6. Satellite and sonde chapter")
+    L.append("## 7. Satellite and sonde chapter")
     if passes:
         for p in passes:
             L.append("- %s %s [%s]: %s"
@@ -530,7 +552,7 @@ def render_report(index, watch_id):
              "a simplified Keplerian model on a spherical Earth, a "
              "scheduling instrument and not an ephemeris.")
     L.append("")
-    L.append("## 7. Transcript highlights")
+    L.append("## 8. Transcript highlights")
     voice = index.count_events(watch_id=watch_id, kind="voice")
     transcripts = [ev for ev in index.events(
         watch_id=watch_id, desk="audiocensus", kinds=("decode",))
@@ -561,7 +583,7 @@ def render_report(index, watch_id):
                  "snippet accounting in the appendix."
                  % (voice, detail))
     L.append("")
-    L.append("## 8. Desk health and failure account")
+    L.append("## 9. Desk health and failure account")
     if health:
         for ev in health:
             L.append("- %s %s" % (util.fmt_stamp(ev["t_start"]),
@@ -570,7 +592,7 @@ def render_report(index, watch_id):
         L.append("No desk failed, crashed, was benched or stood "
                  "down this watch.")
     L.append("")
-    L.append("## 9. Statistics appendix")
+    L.append("## 10. Statistics appendix")
     L.append("Events by desk:")
     for desk, n in sorted(index.counts_by_desk(watch_id).items()):
         L.append("- %s: %d" % (desk, n))
@@ -620,6 +642,35 @@ def _parse_freq(text):
 def ask(index, query):
     """The Index query surface: emitter, frequency, band, or service."""
     q = query.strip()
+    if q.lower() in ("changes", "change log", "changelog"):
+        # The standing change account (0.13.0): the most recent
+        # watch's counts, briefly. The filed changelog.json is
+        # read where it stands; a watch whose stand-down
+        # predates the change log gets the same computation
+        # live, so the answer is the record either way.
+        watch_id = resolve_current_watch(index.home,
+                                         allow_complete=True)
+        if not watch_id:
+            return ("No watch has stood in this home yet; there "
+                    "is no change log.")
+        path = os.path.join(index.watch_dir(watch_id),
+                            "changelog.json")
+        log = util.read_json(path, default=None)
+        if log is None:
+            log = changelog.compute_changelog(index, watch_id)
+        counts = log["counts"]
+        base = log["baseline"]
+        return ("Change log for watch %s: %d new, %d vanished, "
+                "%d moved, %d rhythm-changed; %d established "
+                "emitter(s) unwatched. Baseline: %d earlier "
+                "watch(es), %s. The full account is changelog.json "
+                "in the watch folder and chapter 5 of its Watch "
+                "Report."
+                % (watch_id, counts["new"], counts["vanished"],
+                   counts["moved"], counts["rhythm-changed"],
+                   counts["unwatched"], base["watch_count"],
+                   "provisional" if base["provisional"]
+                   else "established"))
     dossier = index.dossier(q)
     if dossier is not None:
         lines = ["Dossier: %s (%s)" % (dossier["key"], dossier["kind"]),
@@ -679,7 +730,7 @@ def ask(index, query):
                             util.fmt_stamp(d["last_seen"])))
         return "\n".join(lines)
     return ("Nothing in the Index answers to %r. Try an emitter key, a "
-            "frequency, 'band <name>', or a desk name." % q)
+            "frequency, 'band <name>', a desk name, or 'changes'." % q)
 
 
 # ----------------------------------------------------------------- status
