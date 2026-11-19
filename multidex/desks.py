@@ -1042,7 +1042,6 @@ def process_probe(feed, ctx):
     assessment. The desk files no bearing claim: direction
     finding is not part of this build.
     """
-    from . import audiocensus as _ac
     from . import classifier as _classifier
     from . import probe as _probe
     out = []
@@ -1173,12 +1172,19 @@ def process_probe(feed, ctx):
             abs(freq - ch) <= 25000.0 for ch in _ACARS_CHANNELS):
         attempted.add("acars")
         from . import acars as _acars
-        klass = {"am-voice": "AM", "fm-voice": "FM",
-                 "ssb-voice": "USB"}.get(family, "AM")
         try:
-            audio = _ac._demod(chan, rate, klass)
-            messages = _acars.decode_audio(
-                audio, _ac.AUDIO_RATE)
+            # The ACARS module's conforming front end, the
+            # same one the desk's live path and the
+            # retroactive decoder use: local-baseline AM
+            # demodulation and activity-edge slices, where
+            # this attempt formerly fed the census
+            # demodulator's whole-excerpt audio - global-mean
+            # baseline, frame trailing its full padding - to
+            # the frame layer, whose parity gate sinks on
+            # exactly that geometry.
+            audio = _acars.am_demod(chan, rate)
+            messages = _acars.decode_sliced(
+                audio, whole_fallback=True)
         except Exception:
             messages = []
         if messages:

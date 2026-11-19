@@ -220,3 +220,131 @@ def decode_audio(samples, rate=12000):
                         body or text, frame["mode"]))
                     return out
     return out
+
+
+# ------------------------------------------------------- front end
+#
+# The conforming front end: the one route by which audio
+# reaches the frame layer, shared by the desk's live path
+# (multidex.tuner), the probe desk's ACARS attempt
+# (multidex.desks), and the retroactive ACARS decoder
+# (multidex.retro), so the three cannot drift apart. It
+# exists because of the frame layer's parity gate, above:
+# the gate reads a span of up to 240 bytes from a frame's
+# start and demands the span overwhelmingly parity-clean,
+# the BCS pair aside, so bytes demodulated from whatever
+# trails a frame inside its slice - capture padding, or a
+# tuner margin - sink the gate and a verified frame is
+# discarded as if it were noise. A slice must therefore end
+# at the burst's activity edge, within a fraction of a byte
+# of it. The front end's halves are an AM demodulation
+# against a local carrier baseline (for paths that start
+# from channel IQ) and an envelope segmentation that ends
+# each slice at the activity edge with a guard of half the
+# smoothing window - six bits at the frame layer's rate,
+# under one byte - which covers the smoothed envelope's own
+# edge softness without feeding the gate a trailing span of
+# noise it cannot afford.
+
+FRONT_RATE = 12000
+
+
+def _resample_fft(samples, rate_in, rate_out):
+    """FFT resampling: truncate or zero-pad the spectrum at
+    the new rate."""
+    n_out = int(len(samples) * rate_out / rate_in)
+    if n_out <= 0:
+        return samples
+    spec = np.fft.rfft(samples)
+    out_spec = np.zeros(n_out // 2 + 1, dtype=complex)
+    m = min(len(spec), len(out_spec))
+    out_spec[:m] = spec[:m]
+    return np.fft.irfft(out_spec, n_out)
+
+
+def am_demod(chan, rate):
+    """AM-demodulate a baseband channel to audio at
+    FRONT_RATE, the rate the frame layer works at. The
+    envelope is taken against a local carrier baseline - a
+    moving average spanning ten cycles of the 1200 Hz tone,
+    so the tones themselves average out of it - and the
+    baseline is subtracted, which leaves silence quiet, as
+    the rtl_fm audio the tuner feeds the frame layer is
+    quiet in silence. A single global mean, the census
+    demodulator's way, leaves a baseline step at a burst's
+    edges that biases the frame layer's per-bit tone
+    decisions across the whole burst."""
+    env = np.abs(chan)
+    w = max(8, int(round(rate / TONE_ONE)) * 10)
+    pad = np.pad(env, w, mode="reflect")
+    base = np.convolve(pad, np.ones(w) / w, mode="same")[w:-w]
+    return _resample_fft(env - base, rate, FRONT_RATE)
+
+
+def burst_slices(audio, rate=FRONT_RATE):
+    """Burst slices of demodulated audio, segmented on the
+    envelope in the tuner's own ACARS pattern: 5 ms
+    smoothing, activity at four times the median envelope,
+    gaps under a tenth of a second bridged, and slices kept
+    only past a tenth of a second of activity. Each slice is
+    extended by half the smoothing window at both ends -
+    six bits at the frame layer's rate, under one byte -
+    which covers the smoothed envelope's edge softness (in
+    heavy noise its crossing can sit a few samples inside
+    the burst, and the frame's last bits live there) at a
+    trailing cost the parity gate absorbs, where the
+    tuner's former 600-sample margins fed it fifteen bytes
+    of noise and sank it. An excerpt that is one burst wall
+    to wall segments to itself; audio with no activity
+    segments to nothing."""
+    audio = np.asarray(audio, dtype=float)
+    n = len(audio)
+    if n == 0:
+        return []
+    smooth = max(1, int(round(rate * 0.005)))
+    bridge = int(round(rate * 0.1))
+    guard = smooth // 2
+    env = np.abs(audio)
+    if smooth > 1:
+        env = np.convolve(env, np.ones(smooth) / smooth,
+                          mode="same")
+    floor = float(np.median(env)) + 1e-12
+    active = env > floor * 4.0
+    slices = []
+    i = 0
+    while i < n:
+        if active[i]:
+            j = i
+            while j < n and (active[j] or
+                             (j + bridge < n and active[j + bridge])):
+                j += 1
+            if j - i > bridge:
+                slices.append(audio[max(0, i - guard):
+                                    min(n, j + guard)])
+            i = j
+        else:
+            i += 1
+    return slices
+
+
+def decode_sliced(audio, rate=FRONT_RATE, whole_fallback=False):
+    """All verified frames in demodulated audio, decoded
+    slice by slice through the frame layer. The slicing is
+    load-bearing twice over: the frame layer reports at
+    most one frame per call, so one slice per burst is what
+    lets two frames in one window both be heard, and the
+    activity-edge slice ends are what the parity gate
+    demands. With whole_fallback, audio that segments to
+    nothing - a retained excerpt whose activity never
+    crosses the segmentation floor, offered as the burst
+    candidate it was filed as - is offered whole; dwell
+    captures pass False, because a silent dwell is silence,
+    not a candidate. Audio with no activity and no fallback
+    decodes to nothing and files nothing."""
+    slices = burst_slices(audio, rate)
+    if not slices and whole_fallback and len(audio):
+        slices = [np.asarray(audio, dtype=float)]
+    out = []
+    for burst in slices:
+        out.extend(decode_audio(burst, rate))
+    return out

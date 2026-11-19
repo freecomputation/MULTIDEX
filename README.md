@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.12.0.
+Version 0.12.1.
 
 ## The verbs
 
@@ -121,8 +121,15 @@ Five organs, one tuner.
   decoded by `rtl_433`, airband and weather radio run on real audio
   (weather radio SAME headers via `multimon-ng`), and the sonde,
   broadcast, cellular, and trunking desks are fed from the scan
-  census. ACARS benches on the real source: it needs an
-  acarsdec-class decoder, which is not among the bound host tools.
+  census. ACARS decodes in pure Python from the real audio as
+  well: the rtl_fm capture runs through the ACARS module's
+  conforming front end - envelope segmentation ending each
+  burst slice at the activity edge, a discipline the frame
+  layer's parity gate makes load-bearing, because bytes
+  trailed after a frame inside its slice sink the gate - into
+  the package's own ARINC 618 frame layer, and the same front
+  end serves the probe desk's ACARS attempt and the
+  retroactive ACARS decoder.
   A capture that reaches its time limit keeps and processes the
   bytes it did get; a gap is filed only when a desk's capture
   returns zero usable bytes or its tool is absent, and the loss is
