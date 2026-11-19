@@ -1429,6 +1429,21 @@ class WatchRunner:
                                        pre_counts=pre_counts):
             self._file(ev)
         self._maybe_interrupt(item, new_events, watch_start)
+        if item.get("kind") == "probe":
+            # The anomaly register (0.14.0) refreshes when a
+            # probe stare completes: the stare's vote, its
+            # negative results and its discrimination checks
+            # are in the Index now, and the cluster they belong
+            # to may have earned its entry, or raised it to a
+            # special candidate, whose alert product files in
+            # this watch's folder at once.
+            from . import anomaly as _anomaly
+            _summary = _anomaly.refresh_register(
+                self.index, t1, profile=self.profile,
+                watch_id=self.watch_id)
+            for _entry in _summary["special_new"]:
+                _anomaly.write_special_alert(
+                    self.index, self.watch_id, _entry)
 
     def _file_spectrum(self, item, feeds, dwell_ev, t0):
         """File this dwell's spectrum product as tier 1 evidence
@@ -2263,6 +2278,20 @@ class WatchRunner:
                 self.watch_id, end, watch_start):
             self._file(ev)
         self.exploit.build_baselines(self.watch_id)
+        # The anomaly register (0.14.0) is refreshed at
+        # stand-down, before the report renders its anomaly
+        # chapter from the register: clusters that earned an
+        # entry stand in it, registered evidence is sealed,
+        # and any entry newly raised to special candidate
+        # files its own alert product in this watch's folder,
+        # separate from the FLASH line.
+        from . import anomaly as _anomaly
+        _summary = _anomaly.refresh_register(
+            self.index, end, profile=self.profile,
+            watch_id=self.watch_id)
+        for _entry in _summary["special_new"]:
+            _anomaly.write_special_alert(
+                self.index, self.watch_id, _entry)
         # The change log (0.13.0) is part of the stand-down
         # product set: computed from the Index and filed as
         # changelog.json before the report renders its chapter

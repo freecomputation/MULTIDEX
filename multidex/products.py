@@ -11,7 +11,7 @@ import glob
 import os
 import time
 
-from . import changelog, util
+from . import anomaly, changelog, util
 from .bands import BANDS, band_name
 from .desks import SPECS, TRANSCRIPTION_REASON, transcription_state
 from .exploit import GRADE_ORDER, day_picture
@@ -527,16 +527,13 @@ def render_report(index, watch_id):
     L.extend(changelog.render_section(
         changelog.compute_changelog(index, watch_id)))
     L.append("")
-    L.append("## 6. Anomaly chapter")
-    if assessments:
-        for a in assessments:
-            L.append("- %s [%s] %s (rule: %s; baseline: %s; evidence: "
-                     "%s)" % (util.fmt_stamp(a["t_start"]), a["grade"],
-                              a["content"], a["data"].get("rule"),
-                              a["data"].get("baseline", "none"),
-                              ", ".join(a["links"]) or "none"))
-    else:
-        L.append("No assessments were filed this watch.")
+    # The anomaly chapter (0.14.0) renders from the anomaly
+    # register, not from this watch's assessments: the
+    # register is the standing record of the unexplained,
+    # and the chapter states its open entries with their
+    # three-part statements, its special candidates first,
+    # and the resolutions since the last watch.
+    L.extend(anomaly.render_section(index, watch_id))
     L.append("")
     L.append("## 7. Satellite and sonde chapter")
     if passes:
@@ -671,6 +668,43 @@ def ask(index, query):
                    counts["unwatched"], base["watch_count"],
                    "provisional" if base["provisional"]
                    else "established"))
+    if q.lower() in ("anomalies", "anomaly register", "register"):
+        # The anomaly register (0.14.0): its open entries,
+        # briefly. One entry in full is `anomaly <id, emitter
+        # or frequency>`.
+        rows = anomaly.entries(index)
+        if not rows:
+            return ("The anomaly register holds no entries: "
+                    "no unexplained cluster has met the entry "
+                    "bar (recurring, unresolved, and survived "
+                    "the system's attempts to explain it).")
+        acct = anomaly.register_account(index)
+        lines = ["Anomaly register: %d entries, %d open, %d "
+                 "standing as special candidates, %d resolved; "
+                 "%d bytes of registered evidence sealed."
+                 % (acct["entries"], acct["open"],
+                    acct["special"], acct["resolved"],
+                    acct["sealed_bytes"])]
+        for e in anomaly.open_entries(index):
+            lines.append("- %s [%s] %s: %d hearings, last "
+                         "heard %s"
+                         % (e["id"], e["state"],
+                            anomaly.cluster_label(e["cluster"]),
+                            e["hearings"],
+                            util.fmt_stamp(e["last_seen"])))
+        return "\n".join(lines)
+    if q.lower().startswith("anomaly "):
+        rest = q[len("anomaly "):].strip()
+        entry = anomaly.find_entry(index, rest)
+        if entry is None:
+            freq = _parse_freq(rest)
+            if freq is not None:
+                entry = anomaly.find_entry(index, repr(freq))
+        if entry is None:
+            return ("No anomaly register entry answers to %r. "
+                    "Ask 'anomalies' for the open register."
+                    % rest)
+        return anomaly.entry_text(entry)
     dossier = index.dossier(q)
     if dossier is not None:
         lines = ["Dossier: %s (%s)" % (dossier["key"], dossier["kind"]),
@@ -730,7 +764,8 @@ def ask(index, query):
                             util.fmt_stamp(d["last_seen"])))
         return "\n".join(lines)
     return ("Nothing in the Index answers to %r. Try an emitter key, a "
-            "frequency, 'band <name>', a desk name, or 'changes'." % q)
+            "frequency, 'band <name>', a desk name, 'changes', or "
+            "'anomalies'." % q)
 
 
 # ----------------------------------------------------------------- status

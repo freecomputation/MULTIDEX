@@ -581,6 +581,14 @@ class RetroPass:
                 ev["snippet"] = kept[-1] if kept else row["path"]
                 filer(ev)
                 filed_ids.append(ev["id"])
+                # The anomaly register (0.14.0) is consulted
+                # as each find files: a retroactive decode
+                # that resolves a registered cluster closes
+                # its entry now, with this decode linked, and
+                # the Watch Report's anomaly account states
+                # the resolution from the entry itself.
+                from . import anomaly as _anomaly
+                _anomaly.resolve_from_event(self.index, ev, now)
                 if len(account["finds"]) < 10:
                     account["finds"].append({
                         "decoder": entry["name"],

@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.13.0.
+Version 0.14.0.
 
 ## The verbs
 
@@ -475,6 +475,62 @@ prose alike, and it becomes established when the third earlier
 watch stands behind it. The change log is a pure Index
 computation: no tuner is touched, no desk changes, and the
 same Index always yields the same account.
+
+## The anomaly register
+
+The unexplained deserve a register of their own. The anomaly
+register is a table in the Index beside the events: one
+permanent, first-class entry per unexplained cluster that has
+earned it, holding the cluster's retained evidence, its
+negative results, its discrimination checks, and a three-part
+statement of what it resembles, what it is not, and what
+would resolve it. A cluster is the probe desk's own
+clustering: one emitter dossier, or one frequency bucket of
+emitter-less hearings.
+
+The register is selective or it means nothing, and its entry
+bar is stated in its code. A cluster earns an entry only when
+it is graded unresolved, it recurs at or past the probe
+candidate minimum of hearings, and it has survived the
+system's attempts to explain it: a probe stare whose cluster
+vote stayed unresolved, or an equivalent body of filed
+negative results from at least two desks. A one-off
+unresolved hearing files nothing. A cluster any desk has
+decoded never enters, and a registered cluster a desk later
+explains leaves by resolution, with the resolving event
+linked; fresh unexplained hearings on a resolved cluster
+reopen it, with the reopening stated. Entries are created
+and refreshed when a probe stare completes and at
+stand-down. Retained evidence for a registered cluster is
+sealed under the retention tiers: shed-exempt, and counted
+in the sealed account the tiers keep. Retroactive
+exploitation consults the register as it files: a
+retroactive decode that resolves a registered cluster closes
+its entry at that moment, and the Watch Report's anomaly
+chapter says so.
+
+The chapter itself renders from the register: open entries
+with their three-part statements, special candidates first,
+and resolutions since the last watch noted. The ask verb
+answers `anomalies` with the open register and
+`anomaly <id, emitter or frequency>` with one entry in full.
+Doctor states the register's size and its sealed bytes.
+
+Above the ordinary entries stands the special candidate,
+under a strict trigger: the emission matches no known shape
+the cluster vote can carry, carries structure no desk could
+decode across the filed attempt set, persists or recurs,
+survives a probe stare, and survives the self-refutation
+checks the register files for it (catalogued emitters and
+decodes, cross-band coincidence, harmonics of stronger
+hearings, a solar habit). A special candidate raises its own
+alert product in the watch folder, separate from the FLASH
+line. The confirmation rule is absolute: one station cannot
+settle an event of this class, so the register's strongest
+word is candidate, stated exactly that way, indefinitely.
+The register is a record of listening; the station receives
+only and answers nothing, under this chapter as under every
+other.
 
 ## Desk roster
 

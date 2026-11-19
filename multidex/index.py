@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS snippets(
   id TEXT PRIMARY KEY, watch_id TEXT, desk TEXT, kind TEXT, path TEXT,
   bytes INTEGER, shed INTEGER, t REAL, sealed INTEGER);
 CREATE TABLE IF NOT EXISTS watch_meta(watch_id TEXT PRIMARY KEY, data_json TEXT);
+CREATE TABLE IF NOT EXISTS anomaly_register(
+  id TEXT PRIMARY KEY, cluster_kind TEXT, emitter TEXT, freq_hz REAL,
+  bucket INTEGER, state TEXT, data_json TEXT, first_seen REAL,
+  last_seen REAL, hearings INTEGER, created_at REAL, updated_at REAL);
 """
 
 
@@ -207,6 +211,14 @@ class Index:
         links = {r["id"]: r["links_json"] for r in self._rows(
             "SELECT id, links_json FROM events")}
         metas = self._rows("SELECT * FROM watch_meta")
+        # The anomaly register (0.14.0) is a first-class record
+        # in its own right, not a derivation the logs restate:
+        # it is carried across the rebuild like the snippet
+        # table and the watch metadata are.
+        try:
+            register = self._rows("SELECT * FROM anomaly_register")
+        except Exception:
+            register = []
         self.db.close()
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
@@ -238,6 +250,15 @@ class Index:
             self.db.execute(
                 "INSERT OR REPLACE INTO watch_meta VALUES (?,?)",
                 (row["watch_id"], row["data_json"]))
+        for row in register:
+            self.db.execute(
+                "INSERT OR REPLACE INTO anomaly_register VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["id"], row["cluster_kind"], row["emitter"],
+                 row["freq_hz"], row["bucket"], row["state"],
+                 row["data_json"], row["first_seen"],
+                 row["last_seen"], row["hearings"],
+                 row["created_at"], row["updated_at"]))
         self.db.commit()
         return count
 
@@ -676,6 +697,72 @@ class Index:
         row = self.db.execute("SELECT data_json FROM watch_meta WHERE "
                               "watch_id=?", (watch_id,)).fetchone()
         return json.loads(row["data_json"]) if row else None
+
+    # ------------------------------------------------ anomaly register
+    # The register (0.14.0) lives in its own table beside the
+    # events: one row per unexplained cluster that has earned
+    # an entry, the row's data_json carrying the entry's full
+    # structured record (evidence, negative results,
+    # discrimination, the three-part statement). The anomaly
+    # module owns the entry's shape and lifecycle; the Index
+    # owns only its persistence, in the same pattern as the
+    # dossiers and baselines above.
+
+    def register_rows(self):
+        """Every register entry, oldest first, as data dicts."""
+        rows = self._rows("SELECT * FROM anomaly_register "
+                          "ORDER BY first_seen ASC")
+        out = []
+        for r in rows:
+            entry = json.loads(r.pop("data_json"))
+            entry["id"] = r["id"]
+            entry["state"] = r["state"]
+            out.append(entry)
+        return out
+
+    def register_entry(self, register_id):
+        row = self.db.execute(
+            "SELECT * FROM anomaly_register WHERE id=?",
+            (register_id,)).fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        entry = json.loads(r.pop("data_json"))
+        entry["id"] = r["id"]
+        entry["state"] = r["state"]
+        return entry
+
+    def upsert_register(self, entry):
+        """Write one register entry, creating or replacing its
+        row. The entry dict carries the full record; the
+        columns repeat the fields queries sort and filter on."""
+        cluster = entry.get("cluster") or {}
+        self.db.execute(
+            "INSERT OR REPLACE INTO anomaly_register VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (entry["id"], cluster.get("kind"), cluster.get("emitter"),
+             cluster.get("freq_hz"), cluster.get("bucket"),
+             entry["state"], json.dumps(entry),
+             entry.get("first_seen"), entry.get("last_seen"),
+             entry.get("hearings", 0), entry.get("created_at"),
+             entry.get("updated_at")))
+        self.db.commit()
+        return entry
+
+    def seal_snippets(self, snippet_ids):
+        """Seal snippet rows by their store identities: sealed
+        evidence is never a shed candidate (the retention law
+        reads the flag), and sealing is how a registered
+        cluster's retained evidence is frozen under the tiers.
+        Returns the number of rows newly sealed."""
+        n = 0
+        for sid in snippet_ids:
+            cur = self.db.execute(
+                "UPDATE snippets SET sealed=1 WHERE id=? "
+                "AND COALESCE(sealed,0)=0", (sid,))
+            n += cur.rowcount
+        self.db.commit()
+        return n
 
     def close(self):
         for handle in self._log_handles.values():
