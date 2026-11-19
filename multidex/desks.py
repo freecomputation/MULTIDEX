@@ -96,14 +96,28 @@ SPECS = {
     "trunking":  (3, "Trunking census", "light", "window"),
     "sweep":     (3, "Spectrum census and anomaly", "light", "window"),
     "probe":     (3, "Probe of the unexplained", "moderate", "window"),
+    "jupiter":   (2, "Jupiter decametric bursts", "moderate", "window"),
+    "solar":     (3, "Solar bursts and the ionospheric account",
+                  "light", "window"),
+    "meteor":    (3, "Meteor reflections", "light", "window"),
+    "hydrogen":  (2, "Hydrogen line, 1420.405 MHz", "heavy", "window"),
 }
 
 # Desks this build benches with the reason stated, whatever the
-# profile says. Empty in this build: every desk stands in person
-# or through a bound host tool (see CONDITIONAL_BENCHED and
-# toolbind). Kept as the first check in desk_state so a future
-# design bench lands in exactly one place.
-ALWAYS_BENCHED = {}
+# profile says. The hydrogen desk (0.15.0) is the standing
+# example: designed, rostered, and benched on a hardware gate -
+# detecting the galaxy's neutral hydrogen wants aperture and
+# integration a fixed omnidirectional antenna cannot substitute
+# for, so no capture path is built and the desk waits on a dish
+# and a low-noise amplifier rather than pretending to listen.
+ALWAYS_BENCHED = {
+    "hydrogen": ("the hydrogen line at 1420.405 MHz is inside "
+                 "the tuner's range and outside the present "
+                 "antenna's reach: detection wants a small dish "
+                 "and a low-noise amplifier, and no capture path "
+                 "is built until that hardware exists - the gate "
+                 "is hardware, not software"),
+}
 
 # Desks that stand on the real source when a host decoder program
 # is present and bench with the staging instruction when it is
@@ -232,6 +246,7 @@ CPR_PAIR_WINDOW_S = 10.0
 
 def reset_state():
     _adsb_pending.clear()
+    _solar_reset()
 
 
 def process_adsb(feed, ctx):
@@ -632,21 +647,102 @@ def process_sonde(feed, ctx):
                 data={"emitter_kind": "sonde", "flash": True,
                       "site": frames[0]["site"],
                       "max_alt_m": max(f["alt_m"] for f in frames)}))
-    # Real source: the window is censused and carriers in the sonde
-    # band are reported as presence. Telemetry decode needs an
-    # RS41-class decoder program this build does not bind, and the
-    # event says so rather than inventing a track.
+    # The in-house decode path (0.15.0): the feed's channels are
+    # IQ captures of carriers in the window, and the package's
+    # own sonde codec (multidex.sonde) demodulates and deframes
+    # them. A frame files only when its framing and CRC check -
+    # the decoder repairs nothing into a decode.
+    decoded_serials = set()
+    for channel in feed.get("channels", []):
+        frames = _sonde_decode_channel(channel)
+        site = channel.get("site")
+        for frame in frames:
+            decoded_serials.add(frame["serial"])
+            data = {"emitter_kind": "sonde", "lat": frame["lat"],
+                    "lon": frame["lon"], "alt_m": frame["alt_m"],
+                    "temp_c": frame["temp_c"],
+                    "pressure_hpa": frame["pressure_hpa"],
+                    "humidity_pct": frame["humidity_pct"],
+                    "battery_v": frame["battery_v"],
+                    "decoded": "in-house sonde codec"}
+            if site:
+                data["site"] = site
+            ev = make_event(
+                ctx["watch_id"], "sonde", "telemetry",
+                ctx["t0"], ctx["t1"],
+                freq_hz=channel.get("freq_hz") or 402.5e6,
+                emitter=frame["serial"], grade="CONFIRMED",
+                data=data)
+            out.append(ev)
+            by_serial.setdefault(frame["serial"], []).append(
+                dict(frame, site=site, burst=False))
+    # One ascent-profile event per serial the decode heard in
+    # this window: the profile is what the desk exists to file.
+    for serial, frames in by_serial.items():
+        if serial not in decoded_serials:
+            continue
+        alts = [f["alt_m"] for f in frames]
+        temps = [f["temp_c"] for f in frames
+                 if f.get("temp_c") is not None]
+        press = [f["pressure_hpa"] for f in frames
+                 if f.get("pressure_hpa") is not None]
+        out.append(make_event(
+            ctx["watch_id"], "sonde", "pass", ctx["t0"], ctx["t1"],
+            freq_hz=402.5e6, emitter=serial, grade="CONFIRMED",
+            content="ascent profile from %d decoded frame(s): "
+                    "altitude to %.0f m%s%s"
+                    % (len(frames), max(alts),
+                       (", temperature %.1f to %.1f C"
+                        % (min(temps), max(temps))) if temps else "",
+                       (", pressure %.0f to %.0f hPa"
+                        % (min(press), max(press))) if press else ""),
+            data={"emitter_kind": "sonde", "profile": True,
+                  "frames": len(frames), "max_alt_m": max(alts),
+                  "site": frames[0].get("site")}))
+    # Carriers the decode did not turn into telemetry: presence,
+    # with the attempt and its outcome stated. A carrier is not
+    # a track, and the event never pretends otherwise.
+    attempted = "channels" in feed
     for carrier in feed.get("carriers", []):
+        if attempted:
+            wording = ("carrier present in the radiosonde band "
+                       "during the sonde window; the in-house "
+                       "decoder ran over this window's channels "
+                       "and no frame from this carrier passed "
+                       "framing and CRC, so no telemetry is "
+                       "claimed")
+        else:
+            wording = ("carrier present in the radiosonde band "
+                       "during the sonde window; no channel "
+                       "capture was available for decode in this "
+                       "dwell, so no telemetry is claimed")
         out.append(make_event(
             ctx["watch_id"], "sonde", "census", ctx["t0"], ctx["t1"],
             freq_hz=carrier["freq_hz"], emitter=None, grade="PROBABLE",
-            content="carrier present in the radiosonde band during "
-                    "the sonde window; telemetry is not decoded - "
-                    "an RS41-class decoder is not bound in this build",
+            content=wording,
             data={"emitter_kind": "sonde", "telemetry": False,
+                  "decode_attempted": attempted,
                   "peak_dbm": carrier.get("peak_dbm"),
                   "noise_floor_db": carrier.get("noise_floor_db")}))
     return out
+
+
+def _sonde_decode_channel(channel):
+    """Decode one feed channel with the in-house codec. The
+    channel carries its samples the way the excerpts travel:
+    base64 ci16_le at a stated rate (multidex.sigmf)."""
+    from . import sonde as sonde_mod
+    try:
+        import numpy as np
+        raw = base64.b64decode(channel["b64"])
+        vals = np.frombuffer(raw, dtype="<i2").astype(np.float64)
+        iq = (vals[0::2] + 1j * vals[1::2]) / 32767.0 \
+            * float(channel.get("peak") or 1.0)
+    except Exception:
+        return []
+    frames, _stats = sonde_mod.decode_channel(
+        iq, float(channel["rate"]))
+    return frames
 
 
 # ------------------------------------------------------------------ Tier 3
@@ -1612,6 +1708,368 @@ def process_hfdl(feed, ctx):
     return out
 
 
+# ------------------------------------------------------------- Jupiter
+
+def _burst_morphology(iq, rate):
+    """Assess burst morphology from one wideband channel of IQ.
+
+    The analysis is a dynamic-spectrum read: a short-time
+    Fourier transform's power, reduced to an envelope at two
+    time scales and a spectral occupancy. The classes are the
+    ones the decametric literature and the impostor problem
+    dictate: a smooth seconds-long broadband envelope reads
+    L-burst-like; a train of millisecond pulses reads
+    S-burst-like; energy confined to a sliver of the band is a
+    narrowband carrier, which is terrestrial character whatever
+    the window predicted; broadband energy that matches none
+    of the burst shapes files as unclassified. Nothing here
+    confirms an origin - the classes are resemblances, stated
+    as resemblances, and the desk's wording holds that line.
+    """
+    import numpy as np
+    x = np.asarray(iq, dtype=np.complex128)
+    if len(x) < int(rate * 0.2):
+        return {"heard": False, "class": "no capture",
+                "snr_db": 0.0}
+    win = 1024
+    hop = 256
+    n_frames = max(1, (len(x) - win) // hop)
+    idx = np.arange(n_frames)[:, None] * hop + np.arange(win)[None, :]
+    frames = x[idx] * np.hanning(win)[None, :]
+    spec = np.abs(np.fft.fft(frames, axis=1)) ** 2
+    # Spectral detection on the time-averaged spectrum: the
+    # strongest bin against the spectrum's own quiet bins. A
+    # constant carrier has a flat total-power envelope and a
+    # constant level in its own bin over time, so neither a
+    # total-power nor a per-bin-over-time comparison can see
+    # it; across bins on the averaged spectrum it stands
+    # plainly, while plain noise - averaged over hundreds of
+    # frames - stands only a dB or two, far under the gate.
+    # The floor is a low percentile over bins, not the
+    # median: a genuine broadband burst fills most of the
+    # channel, and a median would sit inside the burst and
+    # read it as the floor.
+    nb = spec.shape[1] // 4
+    spec_s = spec[:, :nb * 4].reshape(spec.shape[0], nb, 4).mean(axis=2)
+    avg_spec = spec_s.mean(axis=0)
+    spec_floor = float(np.percentile(avg_spec, 10))
+    ratio = avg_spec / max(spec_floor, 1e-30)
+    snr = float(10 * np.log10(np.max(ratio) + 1e-30))
+    if snr < 10.0:
+        return {"heard": False, "class": "quiet",
+                "snr_db": round(snr, 1)}
+    occ = float(np.mean(ratio > 4.0))
+    # The envelope at the frame scale, for the burst shapes:
+    # excursions of total power over its own quiet level.
+    power_db = 10 * np.log10(spec.sum(axis=1) + 1e-30)
+    env_floor = float(np.percentile(power_db, 10))
+    active = power_db > env_floor + 5.0
+    pulses = 0
+    in_pulse = False
+    for v in active:
+        if v and not in_pulse:
+            pulses += 1
+            in_pulse = True
+        elif not v:
+            in_pulse = False
+    span_s = float(active.sum()) * hop / rate
+    if occ < 0.05:
+        klass = "narrowband carrier"
+    elif pulses >= 8:
+        klass = "S-burst-like pulse train"
+    elif span_s >= 0.6:
+        klass = "L-burst-like broadband envelope"
+    else:
+        klass = "broadband burst, morphology unclassified"
+    return {"heard": True, "class": klass, "snr_db": round(snr, 1),
+            "occupancy": round(occ, 3), "pulses": pulses,
+            "active_s": round(span_s, 2)}
+
+
+def process_jupiter(feed, ctx):
+    """The Jupiter desk: one predicted decametric window.
+
+    The officer bills only windows the ephemeris favours, and
+    the window's geometry rides the ctx. The desk assesses the
+    capture's burst morphology and files the hearing against
+    the JUPITER dossier with the geometry recorded, so every
+    claim carries the means to check it. A hearing is an
+    observation in a predicted window, nothing stronger: the
+    grade never rises above PROBABLE, the word "confirmed" is
+    never used for the emission's origin, and a quiet window
+    files as a quiet window - a result, not a failure.
+    """
+    window = ctx.get("jupiter_window") or {}
+    geo = {"source": window.get("source"),
+           "cml3_deg": window.get("mid_cml3_deg"),
+           "io_phase_deg": window.get("mid_io_phase_deg"),
+           "alt_deg": window.get("mid_alt_deg")}
+    exc = feed.get("excerpt") or {}
+    morph = {"heard": False, "class": "no capture", "snr_db": 0.0}
+    if exc.get("b64"):
+        try:
+            import numpy as np
+            raw = base64.b64decode(exc["b64"])
+            vals = np.frombuffer(raw, dtype="<i2").astype(np.float64)
+            iq = (vals[0::2] + 1j * vals[1::2]) / 32767.0 \
+                * float(exc.get("peak") or 1.0)
+            morph = _burst_morphology(iq, float(exc["rate"]))
+        except Exception:
+            morph = {"heard": False, "class": "unreadable capture",
+                     "snr_db": 0.0}
+    span_note = feed.get("span_note") or (
+        "the capture span the source rendered for this window")
+    if not morph["heard"]:
+        return [make_event(
+            ctx["watch_id"], "jupiter", "census", ctx["t0"], ctx["t1"],
+            freq_hz=ctx.get("freq_hz"), emitter="JUPITER",
+            grade="CONFIRMED",
+            content="predicted decametric window observed (%s "
+                    "geometry, CML III %.0f deg, Io phase %.0f deg, "
+                    "Jupiter %.0f deg up): no burst morphology "
+                    "above the floor in %s - a quiet window, "
+                    "filed as a result"
+                    % (geo["source"] or "unfavoured",
+                       geo["cml3_deg"] or 0, geo["io_phase_deg"] or 0,
+                       geo["alt_deg"] or 0, span_note),
+            data={"emitter_kind": "planet", "heard": False,
+                  "geometry": geo, "morphology": morph})]
+    terrestrial = morph["class"] == "narrowband carrier"
+    data = {"emitter_kind": "planet", "heard": True,
+            "geometry": geo, "morphology": morph,
+            "resembles": morph["class"],
+            "is_not": ("a decoded or identified signal; morphology "
+                       "is resemblance, not identification")}
+    if terrestrial:
+        content = ("in a predicted %s window (CML III %.0f deg, "
+                   "Io phase %.0f deg), the capture's energy is a "
+                   "narrowband carrier occupying %.0f%% of the "
+                   "band: terrestrial character, not burst "
+                   "morphology - filed as heard, claimed as "
+                   "nothing more"
+                   % (geo["source"] or "unfavoured",
+                      geo["cml3_deg"] or 0, geo["io_phase_deg"] or 0,
+                      100 * (morph.get("occupancy") or 0)))
+        grade = "PROBABLE"
+    else:
+        content = ("burst morphology in a predicted %s window "
+                   "(CML III %.0f deg, Io phase %.0f deg, Jupiter "
+                   "%.0f deg up): the capture resembles %s, %.0f dB "
+                   "over the floor across %.0f%% of the band. An "
+                   "observation in a predicted window, filed with "
+                   "its geometry - not a confirmation of origin"
+                   % (geo["source"] or "unfavoured",
+                      geo["cml3_deg"] or 0, geo["io_phase_deg"] or 0,
+                      geo["alt_deg"] or 0, morph["class"],
+                      morph["snr_db"],
+                      100 * (morph.get("occupancy") or 0)))
+        grade = "PROBABLE"
+        if morph["snr_db"] >= 25.0:
+            # The strong-storm FLASH class (plan): a powerful
+            # burst in a predicted window, stated as exactly
+            # what it is.
+            data["flash"] = True
+            data["flash_class"] = "decametric storm in a predicted window"
+    return [make_event(
+        ctx["watch_id"], "jupiter", "observation", ctx["t0"],
+        ctx["t1"], freq_hz=ctx.get("freq_hz"), emitter="JUPITER",
+        grade=grade, content=content, data=data)]
+
+
+# --------------------------------------------------------------- solar
+
+# The solar desk's standing memory, in the worker process: the
+# recent known-signal strength of each HF band it has censused,
+# so a collapse is judged against this watch's own behaviour
+# and not against a constant. Reset with the other desk state.
+_solar_bands = {}
+_solar_sid_latch_until = 0.0
+
+SOLAR_COLLAPSE_DB = 12.0
+SOLAR_HISTORY_S = 7200.0
+
+
+def _solar_reset():
+    _solar_bands.clear()
+    global _solar_sid_latch_until
+    _solar_sid_latch_until = 0.0
+
+
+def process_solar(feed, ctx):
+    """The solar desk: bursts from the Sun, weather from the
+    ionosphere, both read off the station's own census.
+
+    Every feed is one window's scan. The desk files the band
+    state it read, and watches the known-signal strength of
+    the HF bands it has seen: when two or more bands collapse
+    together during daylight - the signature of a flare-driven
+    sudden ionospheric disturbance - it files the disturbance
+    as the station's own observation. It imports no
+    space-weather data and names no flare it did not measure
+    the effect of: the station measures the ionosphere above
+    itself, not the Sun directly.
+    """
+    global _solar_sid_latch_until
+    from . import ephemeris
+    out = []
+    t = ctx["t1"]
+    home = ctx["profile"]["home"]
+    sun_alt, _az = ephemeris.sun_altaz(t, home["lat"], home["lon"])
+    daylight = sun_alt > 0.0
+    floor = feed.get("noise_floor_db")
+    emissions = feed.get("emissions") or []
+    known = [e for e in emissions
+             if not (e.get("shape") or "").startswith("unknown")]
+    # Collapse is tracked per megahertz bucket, not per named
+    # band: the house band names call everything under 30 MHz
+    # "HF", and absorption does not strike the whole of HF
+    # uniformly - the account is only meaningful at a grain
+    # where one part of the spectrum can fade while another
+    # holds.
+    bands_now = {}
+    for e in known:
+        band = "%d MHz" % int(e["freq_hz"] // 1e6)
+        if e.get("peak_dbm") is not None:
+            bands_now[band] = max(bands_now.get(band, -999.0),
+                                  e["peak_dbm"])
+    # Broadband burst: a wideband emission standing well over
+    # the floor in daylight is filed by its morphology.
+    for e in emissions:
+        if (e.get("bw_hz") or 0) >= 400e3 and floor is not None \
+                and e.get("peak_dbm") is not None \
+                and e["peak_dbm"] - floor >= 12.0 and daylight:
+            out.append(make_event(
+                ctx["watch_id"], "solar", "observation",
+                ctx["t0"], ctx["t1"], freq_hz=e["freq_hz"],
+                emitter="SOLAR", grade="PROBABLE",
+                content="broadband elevation %.0f dB over the "
+                        "floor across %s during daylight: "
+                        "morphology consistent with a solar "
+                        "radio burst, filed as the station's "
+                        "own observation"
+                        % (e["peak_dbm"] - floor,
+                           util_hz(e["bw_hz"])),
+                data={"emitter_kind": "solar", "burst": True,
+                      "peak_dbm": e["peak_dbm"],
+                      "noise_floor_db": floor,
+                      "sun_alt_deg": round(sun_alt, 1)}))
+    # The ionospheric account: judge collapses against the
+    # watch's own history before this feed joins it.
+    collapsed = []
+    for band, peak in bands_now.items():
+        hist = [p for (tt, p) in _solar_bands.get(band, [])
+                if t - tt <= SOLAR_HISTORY_S]
+        if hist and peak <= max(hist) - SOLAR_COLLAPSE_DB:
+            collapsed.append(band)
+    for band, peak in bands_now.items():
+        entries = _solar_bands.setdefault(band, [])
+        entries.append((t, peak))
+        _solar_bands[band] = [
+            (tt, p) for (tt, p) in entries
+            if t - tt <= SOLAR_HISTORY_S]
+    if len(collapsed) >= 2 and daylight \
+            and t >= _solar_sid_latch_until:
+        _solar_sid_latch_until = t + 3600.0
+        out.append(make_event(
+            ctx["watch_id"], "solar", "observation",
+            ctx["t0"], ctx["t1"], freq_hz=ctx.get("freq_hz"),
+            emitter="IONOSPHERE", grade="PROBABLE",
+            content="sudden ionospheric disturbance read from "
+                    "the station's own census: known signals "
+                    "collapsed together in %s during daylight, "
+                    "each at least %.0f dB under its strength "
+                    "earlier this watch - the station measures "
+                    "the ionosphere above itself, not the Sun "
+                    "directly, and files the effect, not a flare"
+                    % (", ".join(sorted(collapsed)),
+                       SOLAR_COLLAPSE_DB),
+            data={"emitter_kind": "ionosphere",
+                  "disturbance": True, "flash": True,
+                  "flash_class": "multi-band ionospheric collapse",
+                  "bands": sorted(collapsed),
+                  "sun_alt_deg": round(sun_alt, 1)}))
+    out.append(make_event(
+        ctx["watch_id"], "solar", "census", ctx["t0"], ctx["t1"],
+        freq_hz=ctx.get("freq_hz"), emitter=None, grade="CONFIRMED",
+        content="band state: %s, Sun %.0f deg %s the horizon, "
+                "noise floor %s, %d known emission(s) in the "
+                "window"
+                % (band_name(ctx.get("freq_hz") or 0),
+                   abs(sun_alt), "above" if daylight else "below",
+                   ("%.0f dB" % floor) if floor is not None
+                   else "not measured",
+                   len(known)),
+        data={"emitter_kind": "solar", "band_state": True,
+              "band": band_name(ctx.get("freq_hz") or 0),
+              "noise_floor_db": floor,
+              "known_peak_dbm": bands_now or None,
+              "daylight": daylight,
+              "sun_alt_deg": round(sun_alt, 1)}))
+    return out
+
+
+def util_hz(bw):
+    if bw >= 1e6:
+        return "%.1f MHz" % (bw / 1e6)
+    return "%.0f kHz" % (bw / 1e3)
+
+
+# -------------------------------------------------------------- meteor
+
+def process_meteor(feed, ctx):
+    """The meteor desk: brief reflected enhancements of
+    distant carriers on quiet VHF frequencies, counted as
+    pings. It claims counts and rates, never identifications
+    of stations it did not decode. The hourly account is
+    aggregated in the products from these events; the desk
+    files each ping and one census line per dwell carrying
+    the sampled span the count came from, so a rate is never
+    stated without the time it was counted over."""
+    out = []
+    pings = feed.get("pings") or []
+    for ping in pings:
+        out.append(make_event(
+            ctx["watch_id"], "meteor", "observation",
+            ctx["t0"] + ping.get("offset_s", 0),
+            ctx["t0"] + ping.get("offset_s", 0)
+            + ping.get("dur_s", 0.3),
+            freq_hz=ping["freq_hz"], emitter=None,
+            grade="PROBABLE",
+            content="meteor ping: a %.1f s enhancement of the "
+                    "distant carrier, %.0f dB over the band's "
+                    "floor - a reflection counted, not a station "
+                    "identified"
+                    % (ping.get("dur_s", 0.3),
+                       ping.get("snr_db", 0.0)),
+            data={"emitter_kind": "meteor", "ping": True,
+                  "snr_db": ping.get("snr_db"),
+                  "peak_dbm": ping.get("peak_dbm")}))
+    sampled = feed.get("sampled_s")
+    out.append(make_event(
+        ctx["watch_id"], "meteor", "census", ctx["t0"], ctx["t1"],
+        freq_hz=ctx.get("freq_hz"), emitter=None, grade="CONFIRMED",
+        content="meteor account for this dwell: %d ping(s) "
+                "counted over %s of sampled carrier"
+                % (len(pings),
+                   ("%.0f s" % sampled) if sampled
+                   else "the dwell"),
+        data={"emitter_kind": "meteor", "pings": len(pings),
+              "sampled_s": sampled}))
+    return out
+
+
+# ------------------------------------------------------------ hydrogen
+
+def process_hydrogen(feed, ctx):
+    """The hydrogen desk never runs in this build: it stands
+    in the roster benched on its hardware gate (see
+    ALWAYS_BENCHED), and no feed is ever produced for it. The
+    function exists so the desk's place in the PROCESS table
+    is real; were it ever called, it would file nothing and
+    claim nothing."""
+    return []
+
+
 PROCESS = {
     "adsb": process_adsb,
     "airband": process_airband,
@@ -1635,4 +2093,8 @@ PROCESS = {
     "vdl2": process_vdl2,
     "digitalvoice": process_digitalvoice,
     "hfdl": process_hfdl,
+    "jupiter": process_jupiter,
+    "solar": process_solar,
+    "meteor": process_meteor,
+    "hydrogen": process_hydrogen,
 }

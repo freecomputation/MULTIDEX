@@ -114,6 +114,25 @@ RULES = {
               "the probe's targets are the home's own unresolved "
               "record; wherever the station has heard something "
               "unexplained more than once, a stare can be billed"),
+    "jupiter": ("universal",
+                "Jupiter crosses every sky; whether a decametric "
+                "window is worth billing is a question of the "
+                "planet's altitude and geometry at the hour, "
+                "which the bill itself answers window by window "
+                "- no geography excludes the desk"),
+    "solar": ("universal",
+              "the Sun crosses every sky and the ionosphere is "
+              "over every home; the account reads the station's "
+              "own census wherever the station stands"),
+    "meteor": ("universal",
+               "meteors fall over every home and distant VHF "
+               "carriers exist on every continent; the desk "
+               "counts reflections wherever it stands"),
+    "hydrogen": ("universal",
+                 "the galactic hydrogen line is present in every "
+                 "sky; the desk's bench is a hardware gate stated "
+                 "in the roster, not a judgment of geography, so "
+                 "applicability raises no objection"),
 }
 
 

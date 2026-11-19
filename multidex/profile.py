@@ -43,12 +43,14 @@ DEFAULTS = {
         "fmband":   {"weight": 2,  "dwell_s": 180},
         "hf_day":   {"weight": 4,  "dwell_s": 300},
         "hf_night": {"weight": 4,  "dwell_s": 300},
+        "meteor":   {"weight": 3,  "dwell_s": 300},
     },
     "desks": {
         "stand": ["adsb", "airband", "milair", "acars", "ais", "wxradio",
                   "ism", "aprs", "pager", "sweep", "satellite", "sonde",
                   "cellular", "trunking", "broadcast", "audiocensus",
-                  "amateur", "iss", "vdl2", "digitalvoice", "probe"],
+                  "amateur", "iss", "vdl2", "digitalvoice", "probe",
+                  "jupiter", "solar", "meteor", "hydrogen"],
         "bench": [],
     },
     "probe": {

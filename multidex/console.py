@@ -30,6 +30,7 @@ rendering, the same account the plain status verb gives.
 """
 
 import os
+import time
 
 from . import dashboard, displayfeed, util
 
@@ -44,11 +45,13 @@ BLOCK_MIN_W = 30
 BLOCK_ROWS = 3
 
 SKY_BENCHED = (
-    "The sky account is benched in this build: the astronomical "
-    "desks are not built yet, so no sidereal time, Jupiter "
-    "window, solar band state or meteor rate is claimed here. "
-    "The panel stands in the frame ready for them, the way a "
-    "benched desk stands in the roster.")
+    "No sky account has been published in this watch yet: the "
+    "panel renders the officer's sky records from the display "
+    "feed, and until the first record lands it claims no "
+    "sidereal time, Jupiter window, solar band state or meteor "
+    "rate. The hydrogen desk stands benched on its hardware "
+    "gate - a dish and a low-noise amplifier - and no panel "
+    "line will pretend otherwise.")
 
 FOOTER = ("q - quit view (the watch keeps running) - reattach: "
           "multidex status --live - stop the watch: multidex stop")
@@ -355,11 +358,71 @@ def _pipeline_rows(view, feed, width, height):
 
 # ----------------------------------------------------------------- sky
 
-def _sky_rows(width, height):
+def _sky_rows(feed, width, height):
+    """The sky panel (0.15.0): the newest sky record from the
+    display feed, rendered as published. The officer composes
+    the records from the ephemeris and the desks' own filed
+    tallies; the panel computes nothing, and when no record
+    has landed it says so rather than standing in a bench
+    note for data that now exists."""
     rows = [_fit([("SKY - the astronomical account", "head")], width)]
-    for line in _wrap(SKY_BENCHED, width, max(0, height - 1)):
-        rows.append(_fit([(line, "dim")], width))
-    return rows
+    records = (feed or {}).get("sky") or []
+    if not records:
+        for line in _wrap(SKY_BENCHED, width, max(0, height - 1)):
+            rows.append(_fit([(line, "dim")], width))
+        return rows
+    rec = records[-1]
+    lst = rec.get("lst_deg")
+    lines = []
+    if lst is not None:
+        lines.append("local sidereal time %.1f deg (%.2f h)"
+                     % (lst, lst / 15.0))
+    jup = rec.get("jupiter") or {}
+    if jup.get("alt_deg") is not None:
+        text = "Jupiter %.0f deg up" % jup["alt_deg"]
+        if jup.get("source_now"):
+            text += ", in %s geometry now" % jup["source_now"]
+        lines.append(text)
+    if jup.get("next_window_start"):
+        lines.append("next predicted window %s UTC (%s)"
+                     % (time.strftime("%H:%M",
+                                      time.gmtime(
+                                          jup["next_window_start"])),
+                        jup.get("next_source") or "geometry"))
+    elif jup:
+        lines.append("no predicted decametric window in the "
+                     "next two days at this home")
+    sol = rec.get("solar") or {}
+    if sol.get("sun_alt_deg") is not None:
+        lines.append("Sun %.0f deg %s the horizon%s"
+                     % (abs(sol["sun_alt_deg"]),
+                        "above" if sol.get("daylight") else "below",
+                        "" if not sol.get("daylight") else ""))
+    if sol.get("last_state"):
+        lines.append("last band state: %s" % sol["last_state"])
+    met = rec.get("meteor") or {}
+    if met:
+        if met.get("rate_per_sampled_hour") is not None:
+            lines.append("meteors: %d ping(s), %.1f per sampled "
+                         "hour" % (met.get("pings") or 0,
+                                   met["rate_per_sampled_hour"]))
+        else:
+            lines.append("meteors: %d ping(s), no sampled span "
+                         "yet to rate them over"
+                         % (met.get("pings") or 0))
+    sonde = rec.get("sonde") or {}
+    if sonde.get("last_serial"):
+        lines.append("sonde: last ascent %s to %.0f m"
+                     % (sonde["last_serial"],
+                        sonde.get("last_max_alt_m") or 0))
+    else:
+        lines.append("sonde: no ascent decoded yet this watch")
+    for line in lines:
+        for wrapped in _wrap(line, width, max(0, height - 1)):
+            rows.append(_fit([(wrapped, "normal")], width))
+        if len(rows) >= height:
+            break
+    return rows[:max(1, height)]
 
 
 # ---------------------------------------------------------------- pool
@@ -553,7 +616,7 @@ def build_frame(view, feed, width, height, keepawake=None):
     builders = (
         ("waterfall", lambda h: _waterfall_rows(view, feed, width, h)),
         ("pipeline", lambda h: _pipeline_rows(view, feed, width, h)),
-        ("sky", lambda h: _sky_rows(width, h)),
+        ("sky", lambda h: _sky_rows(feed, width, h)),
         ("pool", lambda h: _pool_rows(view, width, h)),
         ("feed", lambda h: _feed_rows(view, width, h)),
         ("mind", lambda h: _mind_rows(feed, width, h)),

@@ -18,6 +18,12 @@ the watch folder, beside the state file it already publishes:
   verdicts, grants and refusals, benchings, assessment changes,
   FLASH raisings, update handovers - one line per event the
   officer files through its own filing path, at filing time.
+- display-sky.jsonl (0.15.0): the sky account's live records -
+  one per dwell, composed by the officer from the ephemeris
+  and the astronomy desks' own filed tallies (local sidereal
+  time, Jupiter's altitude and next predicted window, the
+  solar state, the meteor rate, the sonde state). The Console
+  renders these records and computes nothing of its own.
 
 The feed is not part of the watch's record. The Index is the
 record; the feed is a projection of it for the glass, and it is
@@ -39,10 +45,12 @@ import os
 SPECTRA_NAME = "display-spectra.jsonl"
 WORK_NAME = "display-work.jsonl"
 THOUGHT_NAME = "display-thought.jsonl"
+SKY_NAME = "display-sky.jsonl"
 
 MAX_SPECTRA = 40
 MAX_WORK = 240
 MAX_THOUGHT = 240
+MAX_SKY = 240
 MAX_BINS = 240
 MAX_BRACKETS = 12
 WORK_LINE_CHARS = 200
@@ -115,6 +123,8 @@ class DisplayFeed:
                            MAX_WORK)
         self._thought = _Ring(os.path.join(watch_dir, THOUGHT_NAME),
                               MAX_THOUGHT)
+        self._sky = _Ring(os.path.join(watch_dir, SKY_NAME),
+                          MAX_SKY)
 
     def spectrum(self, frame):
         """Publish one capture's spectrum frame, sanitised to the
@@ -175,6 +185,19 @@ class DisplayFeed:
             "kind": str(kind or ""), "flash": bool(flash),
             "content": content[:THOUGHT_LINE_CHARS]})
 
+    def sky(self, record):
+        """Publish one sky record (0.15.0), sanitised to plain
+        JSON values: the panel renders records, so a record
+        that cannot be serialised is dropped, never repaired
+        into a plausible one."""
+        if not self.enabled or not isinstance(record, dict):
+            return
+        try:
+            clean = json.loads(json.dumps(record))
+        except (TypeError, ValueError):
+            return
+        self._sky.append(clean)
+
 
 # ------------------------------------------------------------------ read
 
@@ -210,6 +233,8 @@ def load_feed(watch_dir):
                            MAX_WORK),
         "thought": _read_ring(os.path.join(watch_dir, THOUGHT_NAME),
                               MAX_THOUGHT),
+        "sky": _read_ring(os.path.join(watch_dir, SKY_NAME),
+                          MAX_SKY),
     }
 
 

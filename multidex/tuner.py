@@ -767,7 +767,8 @@ class RealSource:
         caps = {"sweep", "adsb", "airband", "milair", "ais", "wxradio",
                 "ism", "aprs", "pager", "satellite", "sonde", "broadcast",
                 "cellular", "trunking", "acars", "audiocensus",
-                "amateur", "iss", "probe"}
+                "amateur", "iss", "probe", "jupiter", "solar",
+                "meteor"}
         # Tool-bound desks stand on the real source only when their
         # decoder program is present on the host; desk_state states
         # the staging reason when they are not.
@@ -1502,7 +1503,122 @@ class RealSource:
                          peak_dbm=em["peak_dbm"],
                          noise_floor_db=scan["noise_floor_db"])
                     for em in scan["emissions"]]
-        return {"carriers": carriers}
+        feed = {"carriers": carriers}
+        # The decode attempt (0.15.0): one IQ capture over the
+        # sonde band, the scan's carriers extracted as channels
+        # for the in-house decoder. A capture that fails leaves
+        # the feed at presence-only, and the desk's wording
+        # says exactly that - the attempt is never implied
+        # where it did not happen.
+        try:
+            import numpy as np
+            from . import audiocensus, sigmf
+            rate = 2400000
+            seconds = 6.0
+            raw = self._iq(403e6, rate, int(rate * seconds),
+                           seconds=int(seconds) + 30)
+            n = len(raw) // 2
+            u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+                np.float32)
+            iq = ((u[0::2] - 127.5) / 127.5
+                  + 1j * ((u[1::2] - 127.5) / 127.5)).astype(
+                      np.complex64)
+            channels = []
+            for carrier in carriers[:3]:
+                offset = carrier["freq_hz"] - 403e6
+                if abs(offset) > 1.1e6:
+                    continue
+                chan, crate = audiocensus._extract(
+                    iq, float(rate), offset, 48e3)
+                data, peak = sigmf.data_bytes(list(chan))
+                channels.append({
+                    "freq_hz": carrier["freq_hz"],
+                    "b64": base64.b64encode(data).decode(),
+                    "rate": crate, "peak": peak})
+            feed["channels"] = channels
+        except Exception:
+            pass
+        return feed
+
+    def _feed_jupiter(self, vfos, center_hz, bw_hz, t0, t1):
+        """The Jupiter window on the real source (0.15.0): one
+        contiguous IQ capture at the dwell's start, the window's
+        centre channel excerpted for the desk's morphology
+        read. The span note states what the capture is - the
+        source keeps no ring buffer, so the window outside
+        this block exists only as the desk's quiet verdict on
+        the block itself."""
+        import numpy as np
+        from . import audiocensus
+        rate = 2400000
+        seconds = 8.0
+        raw = self._iq(center_hz, rate, int(rate * seconds),
+                       seconds=int(seconds) + 30)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        chan, crate = audiocensus._extract(iq, float(rate), 0.0,
+                                           20e3)
+        exc = audiocensus._excerpt(chan, crate)
+        return {"excerpt": exc,
+                "span_note": "one contiguous 8 s capture at the "
+                             "dwell's start, its centre channel "
+                             "excerpted; the real source keeps "
+                             "no ring buffer"}
+
+    def _feed_solar(self, vfos, center_hz, bw_hz, t0, t1):
+        # The solar desk reads the window's own scan: the same
+        # census the sweep flies, shared through the scan cache.
+        return self.scan(center_hz, bw_hz, t0, t1)
+
+    def _feed_meteor(self, vfos, center_hz, bw_hz, t0, t1):
+        """The meteor dwell on the real source (0.15.0): a
+        bounded IQ sample of the beacon channel at the dwell's
+        start, its power read in 50 ms bins; an excursion at
+        least 7 dB over the median lasting 0.05-2 s is a ping.
+        The sampled span is stated in the feed, so the desk's
+        rates are never read as covering the whole dwell."""
+        import numpy as np
+        from . import audiocensus
+        rate = 2400000
+        seconds = 10.0
+        raw = self._iq(center_hz, rate, int(rate * seconds),
+                       seconds=int(seconds) + 30)
+        n = len(raw) // 2
+        u = np.frombuffer(raw[:2 * n], dtype=np.uint8).astype(
+            np.float32)
+        iq = ((u[0::2] - 127.5) / 127.5
+              + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
+        chan, crate = audiocensus._extract(iq, float(rate), 0.0,
+                                           25e3)
+        bin_n = max(1, int(crate * 0.05))
+        nb = len(chan) // bin_n
+        power = np.array([float(np.mean(np.abs(
+            chan[i * bin_n:(i + 1) * bin_n]) ** 2))
+            for i in range(nb)])
+        pdb = 10 * np.log10(power + 1e-20)
+        med = float(np.median(pdb))
+        pings = []
+        i = 0
+        while i < nb:
+            if pdb[i] > med + 7.0:
+                j = i
+                while j < nb and pdb[j] > med + 7.0:
+                    j += 1
+                dur = (j - i) * bin_n / crate
+                if 0.05 <= dur <= 2.0:
+                    pings.append({
+                        "freq_hz": float(center_hz),
+                        "offset_s": round(i * bin_n / crate, 2),
+                        "dur_s": round(dur, 2),
+                        "snr_db": round(float(pdb[i:j].max())
+                                        - med, 1)})
+                i = j
+            else:
+                i += 1
+        return {"pings": pings, "sampled_s": seconds}
 
     def _feed_broadcast(self, vfos, center_hz, bw_hz, t0, t1):
         scan = self.scan(center_hz, bw_hz, t0, t1)
@@ -1557,6 +1673,20 @@ class TunerServer:
         return any(start <= offset < start + dur
                    for start, dur in self.outages)
 
+    def outage_overlaps(self, t0, t1):
+        """Whether any configured outage intersects the span
+        [t0, t1]. A capture is a span, not an instant: an
+        outage that begins mid-dwell kills the capture just
+        as dead as one covering its first second, and the
+        start-instant check alone silently rehearsed nothing
+        whenever a long item - a sonde window, a Jupiter
+        window - spanned the outage whole."""
+        if self.watch_start is None:
+            return False
+        a, b = t0 - self.watch_start, t1 - self.watch_start
+        return any(a < start + dur and start < b
+                   for start, dur in self.outages)
+
     def tune(self, center_hz, bw_hz):
         self.current = (center_hz, bw_hz)
 
@@ -1566,7 +1696,7 @@ class TunerServer:
         return self.source.scan(center_hz, bw_hz, t0, t1)
 
     def capture(self, center_hz, bw_hz, t0, t1, vfos):
-        if self.outage_at(t0):
+        if self.outage_overlaps(t0, t1):
             raise TunerLost("tuner unavailable (configured outage)")
         self.tune(center_hz, bw_hz)
         return self.source.capture(center_hz, bw_hz, t0, t1, vfos)

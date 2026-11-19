@@ -239,7 +239,11 @@ def test_frame_pool_reservoir_and_sky_bench():
     assert "this watch - granted 5.0 GB" in joined
     assert "█" in joined and "▒" in joined
     assert "SKY - the astronomical account" in joined
-    assert "benched in this build" in joined
+    # 0.15.0: the panel's empty state is no longer a bench
+    # note for unbuilt desks - the desks stand, and a feed
+    # with no sky record yet states that none has been
+    # published. (This test's feed carries no sky records.)
+    assert "No sky account has been published" in joined
 
 
 def test_frame_yield_order_at_the_minimum_size():

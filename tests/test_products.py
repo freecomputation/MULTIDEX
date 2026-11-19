@@ -72,8 +72,9 @@ def test_report_chapters_and_coverage(index, profile):
                     "## 3. Day picture", "## 4. Emitter index delta",
                     "## 5. Change log", "## 6. Anomaly chapter",
                     "## 7. Satellite and sonde",
-                    "## 8. Transcript highlights", "## 9. Desk health",
-                    "## 10. Statistics appendix"):
+                    "## 8. Astronomy and atmosphere account",
+                    "## 9. Transcript highlights", "## 10. Desk health",
+                    "## 11. Statistics appendix"):
         assert chapter in report, chapter
     assert "tuner lost during Rotation marine" in report
     assert "Bands never visited" in report
