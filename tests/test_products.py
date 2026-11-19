@@ -70,9 +70,10 @@ def test_report_chapters_and_coverage(index, profile):
     report = products.render_report(index, W)
     for chapter in ("## 1. Executive summary", "## 2. Coverage account",
                     "## 3. Day picture", "## 4. Emitter index delta",
-                    "## 5. Anomaly chapter", "## 6. Satellite and sonde",
-                    "## 7. Transcript highlights", "## 8. Desk health",
-                    "## 9. Statistics appendix"):
+                    "## 5. Change log", "## 6. Anomaly chapter",
+                    "## 7. Satellite and sonde",
+                    "## 8. Transcript highlights", "## 9. Desk health",
+                    "## 10. Statistics appendix"):
         assert chapter in report, chapter
     assert "tuner lost during Rotation marine" in report
     assert "Bands never visited" in report
