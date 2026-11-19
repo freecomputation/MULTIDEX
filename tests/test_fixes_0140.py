@@ -94,7 +94,7 @@ def special_cluster(index, watch="watch-a"):
 # ------------------------------------------------------------- surfaces
 
 def test_version():
-    assert __version__ == "0.15.0"
+    assert __version__ == "0.16.0"
 
 
 # ------------------------------------------------------------ entry bar

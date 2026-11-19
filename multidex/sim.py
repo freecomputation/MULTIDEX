@@ -16,7 +16,7 @@ import base64
 import math
 import random
 
-from . import codecs, modes, orbit
+from . import codecs, displayfeed, modes, orbit
 from .desks import AIRBAND_CHANNELS, MILAIR_CHANNELS
 from .tuner import _wav_b64
 
@@ -491,7 +491,14 @@ class SimSource:
                 "probe", "jupiter", "solar", "meteor"}
 
     # -------------------------------------------------------------- scan
-    def scan(self, center_hz, bw_hz, t0, t1):
+    def _scan_model(self, center_hz, bw_hz, t0, t1):
+        """The scan's world model for a span (0.16.0): the noise
+        floor and the emissions the world holds inside it, with
+        the span's seeded rng positioned after the floor draw,
+        exactly where scan's own rendering has always found it.
+        Extracted so the display stream can render the same
+        model at a single instant without moving a single one
+        of scan's own outputs."""
         w = self.world
         rng = _rng(w.seed, int(t0 // 60), int(center_hz))
         if center_hz < 30e6:
@@ -574,22 +581,16 @@ class SimSource:
                 if "METEOR" in sat["name"]:
                     freq = 137.9e6
                 add(freq, 150e3, -88, "apt", sat["name"])
+        return floor, emissions, lo, hi, rng
+
+    def scan(self, center_hz, bw_hz, t0, t1):
+        floor, emissions, lo, hi, rng = self._scan_model(
+            center_hz, bw_hz, t0, t1)
         # The Console's waterfall frame for this window (0.8.0):
         # the simulated world's own spectrum, its emissions drawn
         # as gaussian shoulders over its floor - the same model
         # the census reads, rendered for the glass.
-        bins = []
-        nb = 120
-        for i in range(nb):
-            f = lo + (hi - lo) * (i + 0.5) / nb
-            v = floor + rng.uniform(-0.8, 0.8)
-            for em in emissions:
-                sigma = max(em["bw_hz"] / 2.5, (hi - lo) / nb)
-                bump = (em["peak_dbm"] - floor) * math.exp(
-                    -0.5 * ((f - em["freq_hz"]) / sigma) ** 2)
-                if bump > 0.5:
-                    v = max(v, floor + bump)
-            bins.append(round(v, 1))
+        bins = self._render_bins(floor, emissions, lo, hi, rng)
         excerpts = []
         unk = [e for e in emissions
                if (e.get("shape") or "").startswith("unknown")]
@@ -605,6 +606,41 @@ class SimSource:
                 "display": {"lo_hz": lo, "hi_hz": hi,
                             "floor_db": round(floor, 1),
                             "bins": bins}}
+
+    @staticmethod
+    def _render_bins(floor, emissions, lo, hi, rng):
+        """The scan's display rendering (0.8.0, extracted
+        0.16.0): the model's emissions as gaussian shoulders
+        over its floor, one seeded noise draw per bin, in the
+        order scan has always drawn them."""
+        bins = []
+        nb = 120
+        for i in range(nb):
+            f = lo + (hi - lo) * (i + 0.5) / nb
+            v = floor + rng.uniform(-0.8, 0.8)
+            for em in emissions:
+                sigma = max(em["bw_hz"] / 2.5, (hi - lo) / nb)
+                bump = (em["peak_dbm"] - floor) * math.exp(
+                    -0.5 * ((f - em["freq_hz"]) / sigma) ** 2)
+                if bump > 0.5:
+                    v = max(v, floor + bump)
+            bins.append(round(v, 1))
+        return bins
+
+    def _display_at(self, center_hz, bw_hz, ts):
+        """The world's spectrum at one instant (0.16.0), for the
+        display stream: the scan model evaluated at ts alone and
+        drawn with the scan's own rendering, so a streamed frame
+        is the same kind of measurement of the same world as the
+        frame a scan publishes - the world as it stands at ts,
+        its bursts and fades included, timestamped ts."""
+        floor, emissions, lo, hi, rng = self._scan_model(
+            center_hz, bw_hz, ts, ts)
+        return {"t": ts, "lo_hz": lo, "hi_hz": hi,
+                "floor_db": round(floor, 1),
+                "bins": self._render_bins(floor, emissions,
+                                          lo, hi, rng),
+                "brackets": []}
 
     def _scan_excerpt(self, em, t0):
         """A synthesized tier 2 excerpt for the world's
@@ -774,7 +810,7 @@ class SimSource:
         return rng.random() < 0.55
 
     # ----------------------------------------------------------- capture
-    def capture(self, center_hz, bw_hz, t0, t1, vfos):
+    def capture(self, center_hz, bw_hz, t0, t1, vfos, stream=None):
         feeds = {}
         for vfo in vfos:
             desk = vfo["desk"]
@@ -840,6 +876,20 @@ class SimSource:
                     "stations": [dict(freq_hz=f, rds=r, peak_dbm=-52.0)
                                  for f, r in self.world.fm_stations
                                  if abs(f - center_hz) <= bw_hz / 2]}
+        if stream is not None:
+            # The display stream (0.16.0): the tuned window's
+            # spectrum at every cadence point inside the dwell,
+            # rendered from the world model at that instant.
+            # Display only and guarded as a whole - the feeds
+            # above are the record, and a stream failure must
+            # never reach them.
+            try:
+                ts = t0 + displayfeed.STREAM_CADENCE_S
+                while ts < t1:
+                    stream(self._display_at(center_hz, bw_hz, ts))
+                    ts += displayfeed.STREAM_CADENCE_S
+            except Exception:
+                pass
         return feeds
 
     def _adsb_frames(self, t0, t1):
