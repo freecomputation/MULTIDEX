@@ -12,6 +12,7 @@ Everything here is synthetic. A simulated watch says so in its
 metadata and in every product it renders.
 """
 
+import base64
 import math
 import random
 
@@ -150,6 +151,19 @@ class SimWorld:
             "shape": "unknown-pulsed", "period": 900})
         self.sonde_sites = profile["sondes"]["sites"]
         self.synoptic_hours = profile["sondes"]["synoptic_hours"]
+        # The astronomical plants (0.15.0), as fixed scripted
+        # moments like the guard transmission - no RNG draws, so
+        # the rest of the world is unchanged: a solar radio
+        # burst in the decametric band early in the watch, and
+        # a sudden ionospheric disturbance later, during which
+        # the world's known HF signals fade together the way
+        # the real ionosphere drops them.
+        self.solar_burst_offset = 2.2 * 3600
+        self.solar_burst_dur = 600
+        self.sid_offset = 5.5 * 3600
+        self.sid_dur = 2400
+        self._jupiter_storm = None
+        self._jupiter_storm_done = False
         tle_path = None
         adv = profile["advanced"]
         if profile.get("_dir"):
@@ -283,6 +297,75 @@ class SimWorld:
                     })
         return flights
 
+    def jupiter_storm(self):
+        """The world's one planted decametric storm: inside the
+        first predicted window the package's own ephemeris
+        finds at the home, so the world and the bill agree by
+        construction. Morphology follows the window's source -
+        Io-B storms are the fast S-burst trains, the rest read
+        as L-burst envelopes. (t0, t1, source, kind) or None."""
+        if self._jupiter_storm_done:
+            return self._jupiter_storm
+        self._jupiter_storm_done = True
+        from . import ephemeris
+        windows = ephemeris.jupiter_windows(
+            self.home[0], self.home[1], self.start,
+            self.start + 48 * 3600)
+        for w0 in windows:
+            span = w0["end"] - w0["start"]
+            if span < 600:
+                continue
+            # The storm occupies the window's middle: it
+            # neither opens nor closes the window, the way a
+            # real storm complex sits inside its geometry.
+            t0 = w0["start"] + span * 0.2
+            t1 = w0["start"] + span * 0.8
+            self._jupiter_storm = (
+                t0, t1, w0["source"],
+                "S" if w0["source"] == "Io-B" else "L")
+            break
+        return self._jupiter_storm
+
+    def in_sid(self, t):
+        return self.start + self.sid_offset <= t \
+            < self.start + self.sid_offset + self.sid_dur
+
+    def in_solar_burst(self, t):
+        return self.start + self.solar_burst_offset <= t \
+            < self.start + self.solar_burst_offset \
+            + self.solar_burst_dur
+
+    def meteor_pings(self, t0, t1, freq_hz):
+        """The world's meteor reflections over [t0, t1] on one
+        carrier: an hourly rate following the radiant geometry
+        - a pre-dawn maximum in local solar time - with
+        deterministic per-hour draws, so the desk's account
+        and the world agree."""
+        pings = []
+        hour = int(t0 // 3600) * 3600
+        while hour < t1:
+            seg0, seg1 = max(t0, hour), min(t1, hour + 3600)
+            if seg1 > seg0:
+                local_h = (hour / 3600.0 + self.home[1] / 15.0) % 24
+                rate = 30.0 if 3 <= local_h < 9 else 8.0
+                expect = rate * (seg1 - seg0) / 3600.0
+                rng = _rng(self.seed, hour, "meteor")
+                n = int(expect)
+                if rng.random() < expect - n:
+                    n += 1
+                for _ in range(n):
+                    off = seg0 - t0 + rng.uniform(
+                        0, max(1.0, seg1 - seg0 - 1))
+                    pings.append({
+                        "freq_hz": freq_hz,
+                        "offset_s": round(off, 1),
+                        "dur_s": round(rng.uniform(0.1, 0.9), 2),
+                        "snr_db": round(rng.uniform(8, 25), 1),
+                        "peak_dbm": round(-110
+                                          + rng.uniform(8, 25), 1)})
+            hour += 3600
+        return sorted(pings, key=lambda p: p["offset_s"])
+
     def _sonde_pos(self, flight, t):
         dt = t - flight["launch"]
         if dt < 0 or dt > 7200:
@@ -405,7 +488,7 @@ class SimSource:
                 "ism", "aprs", "pager", "sweep", "satellite", "sonde",
                 "cellular", "trunking", "broadcast", "audiocensus",
                 "amateur", "iss", "vdl2", "digitalvoice", "hfdl",
-                "probe"}
+                "probe", "jupiter", "solar", "meteor"}
 
     # -------------------------------------------------------------- scan
     def scan(self, center_hz, bw_hz, t0, t1):
@@ -423,6 +506,15 @@ class SimSource:
 
         def add(freq, bw, peak, shape, label=None):
             if lo <= freq <= hi:
+                # The world's sudden ionospheric disturbance
+                # (0.15.0): during the planted span the known HF
+                # signals fade together by some 25 dB - the
+                # signature the solar desk reads its account
+                # from. Unknown shapes are the census's own
+                # business and are not faded by the plant.
+                if w.in_sid(t0) and freq < 30e6 \
+                        and not shape.startswith("unknown"):
+                    peak -= 25.0
                 emissions.append({"freq_hz": freq, "bw_hz": bw,
                                   "peak_dbm": round(peak, 1),
                                   "shape": shape, "label": label})
@@ -466,6 +558,14 @@ class SimSource:
                     add(unk["freq_hz"], unk["bw_hz"], unk["peak_dbm"],
                         unk["shape"], None)
                     break
+        # The world's planted solar burst (0.15.0): a wideband
+        # elevation across the decametric band during its span,
+        # standing well over the floor the way a real burst
+        # stands over a quiet band.
+        if w.in_solar_burst((t0 + t1) / 2) and 15e6 < center_hz < 35e6:
+            floor += 4.0
+            add(center_hz, 2.0e6, floor + 18.0, "solar-burst",
+                "solar burst (simulated)")
         for sat in w.sats:
             elev, _az, _r = orbit.look_angles(
                 sat, (t0 + t1) / 2, w.home[0], w.home[1])
@@ -721,7 +821,16 @@ class SimSource:
             elif desk == "hfdl":
                 feeds["hfdl"] = self._hfdl_feed(center_hz, t0, t1)
             elif desk == "sonde":
-                feeds["sonde"] = {"frames": self._sonde_frames(t0, t1)}
+                feeds["sonde"] = {"channels":
+                                  self._sonde_channels(t0, t1)}
+            elif desk == "jupiter":
+                feeds["jupiter"] = self._jupiter_feed(
+                    center_hz, bw_hz, t0, t1)
+            elif desk == "solar":
+                feeds["solar"] = self.scan(center_hz, bw_hz, t0, t1)
+            elif desk == "meteor":
+                feeds["meteor"] = self._meteor_feed(
+                    center_hz, bw_hz, t0, t1)
             elif desk == "cellular":
                 feeds["cellular"] = {"cells": self._cell_feed(t0, center_hz)}
             elif desk == "trunking":
@@ -1117,6 +1226,115 @@ class SimSource:
                     slot=call["slot"])]
             feed["calls"].append(call)
         return feed
+
+    def _jupiter_feed(self, center_hz, bw_hz, t0, t1):
+        """The Jupiter window on the simulated source (0.15.0):
+        a 2.5 s span at 48 ksps rendered the way the probe
+        stare renders its span. Inside the world's planted
+        storm the span carries the storm's morphology - an
+        L-burst's smooth broadband envelope, or an S-burst
+        train of millisecond pulses for an Io-B window. Outside
+        it the span is quiet noise, with a deterministic
+        narrowband terrestrial carrier in about half the
+        windows: the impostor the desk must call by its shape,
+        not by the window's hopes."""
+        import numpy as np
+        from . import audiocensus
+        w = self.world
+        # The channel is rendered at 48 ksps: the excerpt the
+        # feed carries is bounded in samples, and at this rate
+        # the bound holds a full two seconds of envelope - the
+        # span burst morphology is judged over.
+        fs = 48000.0
+        seconds = 2.5
+        n = int(fs * seconds)
+        rng = _rng(w.seed, int(center_hz), int(t0), "jupiter")
+        gen = np.random.default_rng(int(rng.random() * 1e9))
+        t = np.arange(n) / fs
+        iq = (gen.normal(0, 0.02, n)
+              + 1j * gen.normal(0, 0.02, n)).astype(np.complex128)
+        storm = w.jupiter_storm()
+        in_storm = storm is not None and storm[0] < t1 \
+            and t0 < storm[1] and 18e6 <= center_hz <= 28e6
+        if in_storm:
+            raw = (gen.normal(0, 1, n) + 1j * gen.normal(0, 1, n))
+            spec = np.fft.fft(raw)
+            fr = np.fft.fftfreq(n, 1.0 / fs)
+            keep = np.abs(fr) <= 20e3
+            burst = np.fft.ifft(np.where(keep, spec, 0.0))
+            burst = burst / (np.max(np.abs(burst)) + 1e-9)
+            if storm[3] == "S":
+                gate = ((t % 0.09) < 0.02).astype(np.float64)
+                gate *= (t < 2.2)
+            else:
+                gate = np.clip(np.sin(np.pi * t / seconds) ** 2
+                               * 1.4, 0.0, 1.0)
+            iq = iq + 0.85 * gate * burst
+        elif rng.random() < 0.5:
+            iq = iq + 0.4 * np.exp(2j * np.pi * 10e3 * t)
+        exc = audiocensus._excerpt(iq, fs)
+        return {"excerpt": exc,
+                "span_note": "the simulated source renders the "
+                             "window's most active span at "
+                             "48 ksps, as the probe stare "
+                             "renders its span"}
+
+    def _meteor_feed(self, center_hz, bw_hz, t0, t1):
+        """The meteor dwell on the simulated source: the world
+        models the carrier watched for the whole dwell, so the
+        sampled span is the dwell itself, stated as such."""
+        pings = self.world.meteor_pings(t0, t1, 50.31e6)
+        return {"pings": pings, "sampled_s": float(t1 - t0)}
+
+    def _sonde_channels(self, t0, t1):
+        """The sonde window on the simulated source (0.15.0):
+        each flight in the window transmits real frames of the
+        in-house format - the world's telemetry (position from
+        its track, temperature and pressure from a standard
+        lapse over its altitude) encoded and GFSK-modulated by
+        the package's own codec, so the desk's decoder path is
+        exercised end to end exactly as the real source
+        exercises it."""
+        import numpy as np
+        from . import sigmf, sonde as sonde_mod
+        w = self.world
+        channels = []
+        rate = 48000.0
+        for flight in w.sonde_flights(t0, t1):
+            parts = []
+            heard = False
+            for tt in (t0, (t0 + t1) / 2, t1 - 1):
+                pos = w._sonde_pos(flight, tt)
+                if pos is None:
+                    continue
+                heard = True
+                lat, lon, alt = pos
+                temp = 15.0 - 0.0065 * alt
+                pressure = 1013.25 * (1 - 2.26e-5 * alt) ** 5.25
+                humidity = max(5, int(60 - alt / 400))
+                battery = 3.0 - (tt - flight["launch"]) / 7200 * 0.4
+                payload = sonde_mod.encode_payload(
+                    flight["serial"], lat, lon, alt, temp,
+                    pressure, humidity, battery)
+                parts.append(sonde_mod.modulate(payload, rate))
+                parts.append(np.zeros(int(rate * 0.25),
+                                      dtype=np.complex64))
+            if not heard or not parts:
+                continue
+            iq = np.concatenate(parts).astype(np.complex128)
+            rng = _rng(w.seed, int(flight["launch"]), "sonde")
+            gen = np.random.default_rng(int(rng.random() * 1e9))
+            iq = iq + 0.05 * (gen.normal(0, 1, len(iq))
+                              + 1j * gen.normal(0, 1, len(iq)))
+            data, peak = sigmf.data_bytes(list(iq))
+            freq = 401.0e6 + (int(flight["serial"][1:]) % 3000) \
+                * 1.5e3
+            channels.append({
+                "freq_hz": freq,
+                "b64": base64.b64encode(data).decode(),
+                "rate": rate, "peak": peak,
+                "site": flight["site"]["name"]})
+        return channels
 
     def _sonde_frames(self, t0, t1):
         w = self.world

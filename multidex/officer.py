@@ -63,6 +63,9 @@ ROTATION = {
                  ["sweep", "amateur", "hfdl"], "day"),
     "hf_night": ((10.0e6, 8.9e6, 6.6e6, 5.5e6), 2.4e6,
                  ["sweep", "amateur", "hfdl"], "night"),
+    # The meteor desk (0.15.0) keeps its own rotation entry on
+    # the quiet 6 m beacon frequency it counts reflections of.
+    "meteor":   (50.31e6, 2.4e6, ["meteor"], "all"),
 }
 
 SWEEP_WINDOWS = [7.05e6, 14.2e6, 28.4e6, 50.5e6, 121.5e6, 146.5e6,
@@ -114,6 +117,63 @@ def sonde_items(profile, start, end):
     return items
 
 
+# The Jupiter desk's decametric band (18-28 MHz) is wider
+# than one capture: a predicted window is served as sub-dwells
+# stepping across it, so a storm anywhere in the band stands a
+# chance of being inside a capture while the window lasts.
+# The service rhythm is two sub-dwells billed, one slot left
+# open: a favourable window can run for hours, and under the
+# one-tuner law no single service - however good its geometry
+# - holds the tuner continuously while the traffic desks
+# starve. The open slots fall to the bill's ordinary fill, and
+# the window is still served across its whole span.
+JUPITER_CENTRES = (19.2e6, 21.6e6, 24.0e6, 26.4e6)
+JUPITER_SUBDWELL_S = 900
+JUPITER_SERVE_RUN = 2
+
+
+def jupiter_items(profile, start, end):
+    """Class A: the predicted decametric windows. The
+    ephemeris finds the spans where Jupiter stands at least
+    ten degrees up with a named emission geometry (an Io
+    source or non-Io-A); each span is split into sub-dwells
+    cycling the band's centres, billed two at a time with the
+    third slot left to the fill, and the window's geometry
+    rides the item so the desk files every hearing against
+    the geometry that predicted it."""
+    from . import ephemeris
+    home = profile["home"]
+    items = []
+    windows = ephemeris.jupiter_windows(home["lat"], home["lon"],
+                                        start, end)
+    step = 0
+    for window in windows:
+        t = max(start, window["start"])
+        wend = min(end, window["end"])
+        slot = 0
+        while t < wend:
+            t1 = min(t + JUPITER_SUBDWELL_S, wend)
+            if slot % (JUPITER_SERVE_RUN + 1) < JUPITER_SERVE_RUN:
+                items.append({
+                    "cls": "A", "kind": "jupiter",
+                    "label": "Jupiter decametric window (%s)"
+                             % window["source"],
+                    "start": t, "dur": t1 - t,
+                    "center_hz": JUPITER_CENTRES[
+                        step % len(JUPITER_CENTRES)],
+                    "bw_hz": 2.4e6, "desks": ["jupiter"],
+                    "jupiter_window": {
+                        "source": window["source"],
+                        "mid_cml3_deg": window["mid_cml3_deg"],
+                        "mid_io_phase_deg": window["mid_io_phase_deg"],
+                        "mid_alt_deg": window["mid_alt_deg"]},
+                })
+                step += 1
+            slot += 1
+            t = t1
+    return items
+
+
 def satellite_items(profile, start, end, sats):
     items = []
     home = profile["home"]
@@ -162,6 +222,13 @@ def build_bill(profile, start, sats, stood_down=None):
             placed.append(item)
     if "sonde" not in stood_down:
         for item in sonde_items(profile, start, end):
+            if not any(_overlaps(item["start"],
+                                 item["start"] + item["dur"],
+                                 p["start"], p["start"] + p["dur"])
+                       for p in placed):
+                placed.append(item)
+    if "jupiter" not in stood_down:
+        for item in jupiter_items(profile, start, end):
             if not any(_overlaps(item["start"],
                                  item["start"] + item["dur"],
                                  p["start"], p["start"] + p["dur"])
@@ -281,6 +348,14 @@ class WatchRunner:
         # from, opened at muster or on resume.
         self._retro = None
         self._retro_pool = None
+        # The sky account's live state (0.15.0): the tallies the
+        # Console's sky panel reads, accumulated from the new
+        # desks' own filed events as the watch runs.
+        self._sky_runtime = {"meteor_pings": 0,
+                             "meteor_sampled_s": 0.0,
+                             "solar_last_state": None,
+                             "sonde_last_serial": None,
+                             "sonde_last_max_alt_m": None}
         # Applicability (0.9.0): the desks this watch's muster
         # stood down at the home, {desk: reason}. Set at muster,
         # restored from the watch meta on resume.
@@ -1105,6 +1180,11 @@ class WatchRunner:
         while next_sitrep <= watch_start + resume_elapsed:
             next_sitrep += sitrep_every
         source = self.tuner.source
+        # The sky panel's first record of the watch (0.15.0):
+        # the ephemeris state at the watch's start, before any
+        # desk has filed, so the panel holds real geometry from
+        # the first frame rather than a bench note.
+        self._publish_sky(watch_start + resume_elapsed)
         scale = self._scale if self._scale else time_scale(profile)
         # The watch clock position. On the real source it tracks
         # wall time: an item that starts late (because earlier work
@@ -1259,6 +1339,18 @@ class WatchRunner:
                 item.get("kind") != "probe" and \
                 self._desk_benched_reason("audiocensus", source) is None:
             standing.append("audiocensus")
+        # The solar desk (0.15.0) rides the HF windows the way
+        # the audio census rides every window: its feed is the
+        # window's own scan, and its ionospheric account is
+        # built from exactly the census the sweep flies. It
+        # rides sweep items and any item centred under 30 MHz,
+        # and stands aside elsewhere - there is no HF band
+        # state to read from a UHF dwell.
+        if "solar" not in standing and item.get("kind") != "probe" \
+                and (item.get("kind") == "sweep"
+                     or item["center_hz"] < 30e6) \
+                and self._desk_benched_reason("solar", source) is None:
+            standing.append("solar")
         desk_channels = {name: channels_for(name) for name in standing}
         heavy = {n for n in standing if SPECS[n][2] == "heavy"}
         vfos, dropped = channel_plan(item["center_hz"], item["bw_hz"],
@@ -1338,6 +1430,12 @@ class WatchRunner:
                     ctx["probe"] = probe.execution_context(
                         self.index, item.get("probe_target") or {})
                     feed["target"] = item.get("probe_target") or {}
+                if name == "jupiter":
+                    # The predicted window's geometry rides the
+                    # ctx (0.15.0), so the desk files the hearing
+                    # against the geometry that predicted it.
+                    ctx["jupiter_window"] = item.get(
+                        "jupiter_window") or {}
                 # Per-desk isolation: one desk's processing failure
                 # files as that desk's gap; the dwell's other desks
                 # are unaffected.
@@ -1410,6 +1508,8 @@ class WatchRunner:
                         self.display.work(t1, desk_name, line)
                 self._publish_display_frame(item, feeds, new_events,
                                             t1)
+        self._update_sky_runtime(new_events)
+        self._publish_sky(t1)
         dwell_ev = make_event(
             self.watch_id, "officer", "dwell", t0, t1,
             freq_hz=item["center_hz"], grade="CONFIRMED",
@@ -1444,6 +1544,41 @@ class WatchRunner:
             for _entry in _summary["special_new"]:
                 _anomaly.write_special_alert(
                     self.index, self.watch_id, _entry)
+
+    def _update_sky_runtime(self, events):
+        """Fold this dwell's new-desk events into the sky
+        panel's live tallies (0.15.0). Counts only - the panel
+        renders what the desks filed, never a second reading."""
+        for ev in events:
+            data = ev.get("data") or {}
+            if ev.get("desk") == "meteor" and data.get("pings") \
+                    is not None:
+                self._sky_runtime["meteor_pings"] += data["pings"]
+                if data.get("sampled_s"):
+                    self._sky_runtime["meteor_sampled_s"] += \
+                        float(data["sampled_s"])
+            elif ev.get("desk") == "solar" and data.get("band_state"):
+                self._sky_runtime["solar_last_state"] = \
+                    ev.get("content")
+            elif ev.get("desk") == "sonde" and data.get("profile"):
+                self._sky_runtime["sonde_last_serial"] = \
+                    ev.get("emitter")
+                self._sky_runtime["sonde_last_max_alt_m"] = \
+                    data.get("max_alt_m")
+
+    def _publish_sky(self, t):
+        """Publish one sky record into the display feed for the
+        Console's sky panel: the ephemeris state at t and the
+        desks' tallies so far. Best-effort like every feed
+        write - a failed publish never touches the watch."""
+        if self.display is None:
+            return
+        try:
+            from . import sky as _sky
+            self.display.sky(_sky.compose_record(
+                t, self.profile["home"], self._sky_runtime))
+        except Exception:
+            pass
 
     def _file_spectrum(self, item, feeds, dwell_ev, t0):
         """File this dwell's spectrum product as tier 1 evidence
@@ -2297,6 +2432,13 @@ class WatchRunner:
         # changelog.json before the report renders its chapter
         # from the same computation.
         products.write_changelog(self.index, self.watch_id)
+        # The sky account (0.15.0): the sidereal fold over the
+        # standing record, computed by the officer - the one
+        # component that holds the home's longitude - and filed
+        # as sky.json before the report renders its astronomy
+        # chapter from the same computation.
+        products.write_sky(self.index, self.watch_id,
+                           self.profile["home"])
         text = products.render_report(self.index, self.watch_id)
         util.write_text(os.path.join(self.watch_dir, "REPORT.md"), text)
         self._file(make_event(

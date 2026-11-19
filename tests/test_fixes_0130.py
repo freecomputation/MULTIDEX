@@ -50,7 +50,7 @@ def by_kind(log, kind):
 
 
 def test_version():
-    assert __version__ == "0.14.0"
+    assert __version__ == "0.15.0"
 
 
 # ------------------------------------------------------------------ new

@@ -110,6 +110,15 @@ def maybe_flash(index, watch_id, ev, profile):
         reason = "assessment"
     elif ev["kind"] == "pass" and ev["data"].get("flash"):
         reason = "pass complete"
+    elif ev["kind"] == "observation" and ev["desk"] in ("jupiter",
+                                                        "solar") \
+            and ev["data"].get("flash"):
+        # The two astronomical FLASH classes (0.15.0), and only
+        # these two: a strong burst inside a predicted Jupiter
+        # window, and a sharp multi-band ionospheric collapse.
+        # The branch is scoped to the two desks so no other
+        # desk's data flag can raise one by accident.
+        reason = ev["data"].get("flash_class") or "astronomical event"
     elif ev["kind"] == "pass" and ev["desk"] == "satellite" \
             and ev["grade"] == "CONFIRMED" \
             and not ev["data"].get("acknowledged"):
@@ -231,6 +240,141 @@ def write_changelog(index, watch_id):
     util.write_json(os.path.join(index.watch_dir(watch_id),
                                  "changelog.json"), log)
     return log
+
+
+def write_sky(index, watch_id, home):
+    """Compute the sky account and file it as sky.json in the
+    watch folder (0.15.0). The officer calls this at stand-down
+    beside the change log: the fold needs the home's longitude,
+    which the products deliberately never hold, so the officer
+    passes it in and the report's astronomy chapter renders
+    from the filed account. Returns the computed account."""
+    from . import sky as _sky
+    account = _sky.build_account(index, home)
+    account["meteor"] = _sky.meteor_hours(index, watch_id, home)
+    util.write_json(os.path.join(index.watch_dir(watch_id),
+                                 "sky.json"), account)
+    return account
+
+
+# ------------------------------------------------- astronomy chapter
+
+def astronomy_section(index, watch_id):
+    """Chapter 8: the astronomy and atmosphere account
+    (0.15.0), rendered from the desks' own events and the
+    sky.json the officer filed at stand-down. Every line is
+    the station's own observation: Jupiter windows taken and
+    missed with their geometry against the results, the solar
+    band-state summary and its disturbances, the meteor rates
+    by local hour with the pre-dawn comparison stated either
+    way, the sidereal fold of the census floor, and the
+    propagation account - ionosonde chirps and sferic-like
+    impulses counted where the census filed them, and the
+    classes no detector stands for named as absences rather
+    than filled in."""
+    from . import sky as _sky
+    L = ["## 8. Astronomy and atmosphere account"]
+    bill = _bill(index, watch_id)
+    jup_items = [b for b in bill if b.get("kind") == "jupiter"]
+    done_ids = {d["data"].get("bill_id")
+                for d in index.events(watch_id=watch_id,
+                                      kinds=["dwell"], limit=100000)}
+    jup_done = [b for b in jup_items if b["id"] in done_ids]
+    hearings = index.events(watch_id=watch_id, desk="jupiter",
+                            kinds=["observation"], limit=10000)
+    quiet = [e for e in index.events(watch_id=watch_id,
+                                     desk="jupiter",
+                                     kinds=["census"], limit=10000)
+             if not (e["data"] or {}).get("heard")]
+    L.append("Jupiter: %d decametric sub-dwell(s) billed in "
+             "predicted windows, %d executed; %d hearing(s) with "
+             "burst morphology, %d window(s) quiet. A hearing is "
+             "an observation in a predicted window, filed with "
+             "its geometry - nothing in this chapter confirms an "
+             "origin."
+             % (len(jup_items), len(jup_done), len(hearings),
+                len(quiet)))
+    for ev in hearings[:12]:
+        L.append("- %s: %s" % (util.fmt_stamp(ev["t_start"]),
+                               ev["content"]))
+    solar_states = index.events(watch_id=watch_id, desk="solar",
+                                kinds=["census"], limit=100000)
+    bursts = [e for e in index.events(watch_id=watch_id,
+                                      desk="solar",
+                                      kinds=["observation"],
+                                      limit=10000)
+              if (e["data"] or {}).get("burst")]
+    disturbances = [e for e in index.events(
+        watch_id=watch_id, desk="solar", kinds=["observation"],
+        limit=10000) if (e["data"] or {}).get("disturbance")]
+    day_states = [e for e in solar_states
+                  if (e["data"] or {}).get("daylight")]
+    L.append("Solar and ionosphere: %d band state(s) filed, %d "
+             "of them in daylight; %d broadband burst "
+             "observation(s); %d disturbance(s) read from the "
+             "station's own census. The station measures the "
+             "ionosphere above itself, not the Sun directly."
+             % (len(solar_states), len(day_states), len(bursts),
+                len(disturbances)))
+    for ev in (bursts + disturbances)[:8]:
+        L.append("- %s: %s" % (util.fmt_stamp(ev["t_start"]),
+                               ev["content"]))
+    account = util.read_json(os.path.join(index.watch_dir(watch_id),
+                                          "sky.json"), default=None)
+    met = index.events(watch_id=watch_id, desk="meteor",
+                       kinds=["observation"], limit=100000)
+    pings = [e for e in met if (e["data"] or {}).get("ping")]
+    if account and account.get("meteor"):
+        mh = account["meteor"]
+        L.append("Meteors: %d ping(s) counted this watch. By "
+                 "local hour (pings / rate per sampled hour): %s. "
+                 "Pre-dawn hours (03-09 local) hold %d of them "
+                 "against %d at all other hours - the pre-dawn "
+                 "maximum the radiant geometry predicts is %s "
+                 "in this watch's account."
+                 % (mh["total_pings"],
+                    ", ".join("%02dh %d/%s" % (
+                        h["local_hour"], h["pings"],
+                        h["rate_per_sampled_hour"]
+                        if h["rate_per_sampled_hour"] is not None
+                        else "-")
+                        for h in mh["hours"] if h["pings"]
+                        or h["sampled_s"]),
+                    mh["predawn_pings"], mh["other_pings"],
+                    "visible" if mh["predawn_pings"]
+                    > mh["other_pings"] else "not visible"))
+    else:
+        L.append("Meteors: %d ping(s) counted this watch; the "
+                 "hourly account was not filed for this watch."
+                 % len(pings))
+    L.append("The sidereal sky figure: the census noise floor "
+             "under 30 MHz folded by local sidereal time over "
+             "the standing record (%d reading(s))."
+             % (account or {}).get("events_folded", 0))
+    if account:
+        for line in _sky.render_fold_lines(account):
+            L.append("  " + line)
+    else:
+        L.append("  The sky account was not filed for this "
+                 "watch, so no fold is drawn.")
+    sweeps = index.events(watch_id=watch_id, desk="sweep",
+                          kinds=["observation"], limit=100000)
+    chirps = [e for e in sweeps
+              if "chirp" in str((e["data"] or {}).get("shape") or "")]
+    sferics = [e for e in sweeps
+               if "sferic" in str((e["data"] or {}).get("shape")
+                                  or "")]
+    L.append("Propagation account: %d ionosonde chirp(s) and "
+             "%d sferic-like impulse(s) were censused by shape "
+             "this watch. No ducting or sporadic-E detector "
+             "stands in this build; those classes are read from "
+             "the band-state record above when they occur, and "
+             "are not claimed here on any other basis."
+             % (len(chirps), len(sferics)))
+    L.append("The hydrogen line stands benched on its hardware "
+             "gate (a dish and a low-noise amplifier); this "
+             "watch took no hydrogen capture and claims none.")
+    return L
 
 
 # ----------------------------------------------------------- Watch Report
@@ -549,7 +693,9 @@ def render_report(index, watch_id):
              "a simplified Keplerian model on a spherical Earth, a "
              "scheduling instrument and not an ephemeris.")
     L.append("")
-    L.append("## 8. Transcript highlights")
+    L.extend(astronomy_section(index, watch_id))
+    L.append("")
+    L.append("## 9. Transcript highlights")
     voice = index.count_events(watch_id=watch_id, kind="voice")
     transcripts = [ev for ev in index.events(
         watch_id=watch_id, desk="audiocensus", kinds=("decode",))
@@ -580,7 +726,7 @@ def render_report(index, watch_id):
                  "snippet accounting in the appendix."
                  % (voice, detail))
     L.append("")
-    L.append("## 9. Desk health and failure account")
+    L.append("## 10. Desk health and failure account")
     if health:
         for ev in health:
             L.append("- %s %s" % (util.fmt_stamp(ev["t_start"]),
@@ -589,7 +735,7 @@ def render_report(index, watch_id):
         L.append("No desk failed, crashed, was benched or stood "
                  "down this watch.")
     L.append("")
-    L.append("## 10. Statistics appendix")
+    L.append("## 11. Statistics appendix")
     L.append("Events by desk:")
     for desk, n in sorted(index.counts_by_desk(watch_id).items()):
         L.append("- %s: %d" % (desk, n))
@@ -668,6 +814,35 @@ def ask(index, query):
                    counts["unwatched"], base["watch_count"],
                    "provisional" if base["provisional"]
                    else "established"))
+    if q.lower() in ("sky", "sky account", "astronomy"):
+        # The sky account (0.15.0): the most recent watch's
+        # filed sky.json, briefly - the sidereal fold's span
+        # and the meteor account's pre-dawn comparison.
+        watch_id = resolve_current_watch(index.home,
+                                         allow_complete=True)
+        if not watch_id:
+            return ("No watch has stood in this home yet; there "
+                    "is no sky account.")
+        account = util.read_json(os.path.join(
+            index.watch_dir(watch_id), "sky.json"), default=None)
+        if account is None:
+            return ("Watch %s filed no sky account (its "
+                    "stand-down predates the account, or the "
+                    "astronomy desks did not stand)."
+                    % watch_id)
+        have = [b for b in account["bins"]
+                if b["median_floor_db"] is not None]
+        met = account.get("meteor") or {}
+        return ("Sky account for watch %s: %d HF census "
+                "reading(s) folded by sidereal time across %d "
+                "sidereal hour(s); meteors %d ping(s), %d of "
+                "them in the pre-dawn hours against %d at other "
+                "hours. The full figure is sky.json in the watch "
+                "folder and chapter 8 of its Watch Report."
+                % (watch_id, account["events_folded"], len(have),
+                   met.get("total_pings", 0),
+                   met.get("predawn_pings", 0),
+                   met.get("other_pings", 0)))
     if q.lower() in ("anomalies", "anomaly register", "register"):
         # The anomaly register (0.14.0): its open entries,
         # briefly. One entry in full is `anomaly <id, emitter
@@ -764,8 +939,8 @@ def ask(index, query):
                             util.fmt_stamp(d["last_seen"])))
         return "\n".join(lines)
     return ("Nothing in the Index answers to %r. Try an emitter key, a "
-            "frequency, 'band <name>', a desk name, 'changes', or "
-            "'anomalies'." % q)
+            "frequency, 'band <name>', a desk name, 'changes', 'sky', "
+            "or 'anomalies'." % q)
 
 
 # ----------------------------------------------------------------- status

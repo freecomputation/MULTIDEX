@@ -65,6 +65,7 @@ trunking = { weight = 3,  dwell_s = 240 }
 fmband   = { weight = 2,  dwell_s = 180 }
 hf_day   = { weight = 4,  dwell_s = 300 }
 hf_night = { weight = 4,  dwell_s = 300 }
+meteor   = { weight = 3,  dwell_s = 300 }
 
 [desks]
 # Desks that stand the watch. Desks absent from this list are benched
@@ -73,7 +74,8 @@ hf_night = { weight = 4,  dwell_s = 300 }
 stand = ["adsb", "airband", "milair", "acars", "ais", "wxradio", "ism",
          "aprs", "pager", "sweep", "satellite", "sonde", "cellular",
          "trunking", "broadcast", "audiocensus", "amateur", "iss",
-         "vdl2", "digitalvoice", "hfdl", "probe"]
+         "vdl2", "digitalvoice", "hfdl", "probe", "jupiter", "solar",
+         "meteor", "hydrogen"]
 # Desks to bench even though they could stand.
 bench = []
 

@@ -73,14 +73,23 @@ def test_aircraft_cadence_is_minutes_not_an_hour(profile):
     assert gaps and statistics.median(gaps) < 900, (
         "aircraft dwells must be minutes apart in the median; "
         "median gap %s" % (statistics.median(gaps),))
-    # The only long aircraft silence allowed is the deep-sweep
-    # block (01:00-04:00), where census sweeps own the tuner by
-    # design: any gap over 45 minutes must be filled by sweeps.
+    # The only long aircraft silences allowed are designed
+    # occupation: the deep-sweep block (01:00-04:00), where
+    # census sweeps own the tuner by design, and spans where
+    # Class A clock items - satellite passes, sonde windows,
+    # and (0.15.0) predicted Jupiter windows - own it by the
+    # same design. A gap over 45 minutes must be filled by
+    # sweeps, or mostly filled by Class A items; a gap filled
+    # by neither is neglect, and fails.
     sweeps = [(i["start"], i["start"] + i["dur"]) for i in bill
               if i["label"] == "Census sweep"]
+    class_a = [(i["start"], i["start"] + i["dur"]) for i in bill
+               if i["cls"] == "A"]
     for a, b in zip(starts, starts[1:]):
         if b - a > 2700:
             covered = [s for s in sweeps if a <= s[0] and s[1] <= b]
-            assert len(covered) >= 4, (
-                "aircraft gap %0.0f-%0.0f is not the deep-sweep block"
-                % (a - T0, b - T0))
+            a_held = sum(min(e, b) - max(s, a) for s, e in class_a
+                         if s < b and a < e)
+            assert len(covered) >= 4 or a_held >= (b - a) / 2, (
+                "aircraft gap %0.0f-%0.0f is neither the deep-sweep "
+                "block nor Class A occupation" % (a - T0, b - T0))
