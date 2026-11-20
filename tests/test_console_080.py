@@ -3,12 +3,14 @@
 The frame builder is pure, so the acceptance discipline is the
 house one: recorded feeds are replayed through it headlessly at
 fixed terminal sizes and the rendered frames are asserted
-against the feed's ground truth - the recorded lock bracket at
-the recorded frequency, the recorded desk states, no panel
-crushed or scrolled at any size, the compact fallback below the
-minimum, a stale feed stating its age. The officer invariance
-test runs two simulated watches, feed on and feed off, and
-holds their event records identical.
+against the feed's ground truth - the recorded desk states, no
+panel crushed or scrolled at any size, the compact fallback
+below the minimum. The officer invariance test runs two
+simulated watches, feed on and feed off, and holds their event
+records identical. (The spectrum waterfall panel this file's
+first version asserted was removed in 0.16.1; the spectrum
+product tests below now pin the evidence projection the panel
+once read.)
 """
 
 import json
@@ -31,7 +33,7 @@ START = 1000000.0
 
 # ------------------------------------------------------------ fixtures
 
-def _raw(spectra_t=START + 3590.0, complete=False):
+def _raw(complete=False):
     bill = [
         {"id": "bill-001", "cls": "C", "kind": "sweep",
          "label": "Census sweep", "start": START + 3000, "dur": 600,
@@ -78,18 +80,9 @@ def _raw(spectra_t=START + 3590.0, complete=False):
             "pool": state["budget"], "update": None}
 
 
-def _feed(spectra_t=START + 3590.0):
-    bins = [-110.0] * 100 + [-70.0] * 5 + [-110.0] * 115
+def _feed():
     return {
-        "spectra": [{
-            "t": spectra_t, "bill_id": "bill-001",
-            "label": "Census sweep", "kind": "sweep",
-            "lo_hz": 13.1e6, "hi_hz": 15.3e6, "floor_db": -110.0,
-            "bins": bins,
-            "brackets": [{"desk": "sweep", "name": "UNKNOWN-14.25",
-                          "grade": "UNRESOLVED", "freq_hz": 14.25e6,
-                          "lo_hz": 14.24e6, "hi_hz": 14.26e6}]}],
-        "work": [{"t": spectra_t, "desk": "sweep",
+        "work": [{"t": START + 3590.0, "desk": "sweep",
                   "line": "unknown at 14.250 MHz"}],
         "thought": [
             {"t": START + 1, "desk": "officer", "kind": "system",
@@ -124,22 +117,13 @@ def test_feed_rings_are_bounded(tmp_path):
     assert len(loaded["thought"]) == displayfeed.MAX_THOUGHT
     assert loaded["thought"][-1]["content"].endswith(
         str(displayfeed.MAX_THOUGHT * 3 - 1))
-    for i in range(displayfeed.MAX_SPECTRA * 3):
-        feed.spectrum({"t": float(i), "lo_hz": 1e6, "hi_hz": 2e6,
-                       "floor_db": -100.0,
-                       "bins": [-100.0] * 500, "brackets": []})
-    loaded = displayfeed.load_feed(str(tmp_path))
-    assert len(loaded["spectra"]) == displayfeed.MAX_SPECTRA
-    assert all(len(f["bins"]) <= displayfeed.MAX_BINS
-               for f in loaded["spectra"])
 
 
 def test_feed_disabled_writes_nothing(tmp_path):
     feed = displayfeed.DisplayFeed(str(tmp_path), enabled=False)
     feed.thought(1.0, "officer", "system", "muster passed")
     feed.work(1.0, "sweep", "a line")
-    feed.spectrum({"t": 1.0, "lo_hz": 1e6, "hi_hz": 2e6,
-                   "bins": [-1.0], "brackets": []})
+    feed.sky({"t": 1.0})
     assert os.listdir(str(tmp_path)) == []
 
 
@@ -153,7 +137,7 @@ def test_pool_bins_preserves_a_narrow_carrier():
 
 # ------------------------------------------------------ spectrum sources
 
-def test_audiocensus_display_spectrum():
+def test_audiocensus_spectrum_product():
     fs = 240000.0
     n = 65536
     t = np.arange(n) / fs
@@ -162,9 +146,9 @@ def test_audiocensus_display_spectrum():
           + 0.03 * (rng.standard_normal(n)
                     + 1j * rng.standard_normal(n))).astype(np.complex128)
     out = audiocensus.analyze(iq, fs, 100e6)
-    disp = out["display"]
+    disp = out["spectrum"]
     assert disp is not None
-    assert len(disp["bins"]) <= displayfeed.MAX_BINS
+    assert len(disp["bins"]) <= audiocensus.PRODUCT_BINS
     assert disp["lo_hz"] < 100.03e6 < disp["hi_hz"]
     peak_i = int(np.argmax(disp["bins"]))
     peak_f = disp["lo_hz"] + (peak_i + 0.5) / len(disp["bins"]) \
@@ -173,10 +157,10 @@ def test_audiocensus_display_spectrum():
     assert abs(peak_f - 100.03e6) < 2 * bin_hz
 
 
-def test_sim_scan_display_spectrum(profile):
+def test_sim_scan_spectrum_product(profile):
     source = SimSource(profile, T0)
     out = source.scan(162.4e6, 2.4e6, T0, T0 + 60)
-    disp = out["display"]
+    disp = out["spectrum"]
     assert disp["lo_hz"] == pytest.approx(162.4e6 - 1.2e6)
     assert disp["hi_hz"] == pytest.approx(162.4e6 + 1.2e6)
     peak_i = int(np.argmax(disp["bins"]))
@@ -195,22 +179,9 @@ def test_frame_shape_holds_at_fixed_sizes(width, height):
     frame, text = _text(_view(), _feed(), width, height)
     assert len(frame) == height
     assert all(len(row) <= width for row in text)
-    assert "SPECTRUM" in text[4]
-    assert "PIPELINE" in "\n".join(text)
+    assert text[4].startswith("PIPELINE")
+    assert "SPECTRUM" not in "\n".join(text)
     assert text[-1].startswith("q - quit view")
-
-
-def test_frame_bracket_lands_at_the_recorded_frequency():
-    width = 210
-    _frame, text = _text(_view(), _feed(), width, 58)
-    plot = [row for row in text if "UNKNOWN-14.25" in row]
-    assert len(plot) == 1
-    col = plot[0].index("UNKNOWN-14.25")
-    expected = int((14.24e6 - 13.1e6) / (15.3e6 - 13.1e6) * width)
-    assert abs(col - expected) <= 3
-    axis = [row for row in text if "13.100 MHz" in row
-            and "14.200 MHz" in row]
-    assert len(axis) == 1
 
 
 def test_frame_carries_the_recorded_desk_states():
@@ -247,14 +218,15 @@ def test_frame_pool_reservoir_and_sky_bench():
 
 
 def test_frame_yield_order_at_the_minimum_size():
-    # At 76x22 the mind stream and the event feed yield first;
-    # the waterfall and the pipeline stand.
+    # At 76x22 the mind stream yields first, from the bottom
+    # of the priority order; the pipeline, the sky panel, the
+    # pool and the event feed stand.
     _frame, text = _text(_view(), _feed(), 76, 22)
     joined = "\n".join(text)
-    assert "SPECTRUM" in joined
     assert "PIPELINE" in joined
+    assert "EVENT FEED" in joined
     assert "MIND" not in joined
-    assert "EVENT FEED" not in joined
+    assert "SPECTRUM" not in joined
 
 
 @pytest.mark.parametrize("width,height", [(60, 18), (48, 30),
@@ -269,28 +241,19 @@ def test_frame_below_the_minimum_is_the_compact_status(width,
     assert "SPECTRUM" not in joined
 
 
-def test_frame_stale_feed_states_its_age():
-    old = _feed(spectra_t=START + 60.0)
-    _frame, text = _text(_view(), old, 210, 58)
-    title = [row for row in text if row.startswith("SPECTRUM")][0]
-    assert "HELD" in title
-    assert "ago" in title
-
-
 def test_frame_completed_watch_reads_final():
     _frame, text = _text(_view(complete=True), _feed(), 210, 58)
-    title = [row for row in text if row.startswith("SPECTRUM")][0]
-    assert "final capture" in title
     assert "COMPLETE" in text[0]
+    assert "SPECTRUM" not in "\n".join(text)
 
 
 def test_frame_without_a_feed_stands_empty_and_says_so():
-    empty = {"spectra": [], "work": [], "thought": []}
+    empty = {"work": [], "thought": [], "sky": []}
     frame, text = _text(_view(), empty, 210, 58)
     assert len(frame) == 58
     joined = "\n".join(text)
-    assert "no capture published yet" in joined
     assert "nothing filed yet" in joined
+    assert "SPECTRUM" not in joined
 
 
 def test_frame_update_posture_in_the_header():
@@ -403,23 +366,25 @@ def test_watch_publishes_the_feed_and_nothing_changes(
         _event_record(home_off, wid_off)
     dir_on = os.path.join(home_on, "watches", wid_on)
     dir_off = os.path.join(home_off, "watches", wid_off)
-    for name in (displayfeed.SPECTRA_NAME, displayfeed.WORK_NAME,
-                 displayfeed.THOUGHT_NAME):
+    for name in (displayfeed.WORK_NAME, displayfeed.THOUGHT_NAME,
+                 displayfeed.SKY_NAME):
         assert not os.path.exists(os.path.join(dir_off, name))
+    # No spectrum ring is published in either state (0.16.1).
+    for watch_dir in (dir_on, dir_off):
+        assert not os.path.exists(
+            os.path.join(watch_dir, "display-spectra.jsonl"))
     feed = displayfeed.load_feed(dir_on)
-    assert feed["spectra"], "the watch published no spectrum frames"
+    assert set(feed) == {"work", "thought", "sky"}
     assert feed["thought"], "the watch published no thought lines"
     assert feed["work"], "the watch published no work lines"
-    frame0 = feed["spectra"][0]
-    assert frame0["hi_hz"] > frame0["lo_hz"]
-    assert 0 < len(frame0["bins"]) <= displayfeed.MAX_BINS
+    assert feed["sky"], "the watch published no sky records"
     assert any(th["content"].startswith("muster passed")
                for th in feed["thought"])
     # The published feed renders through the real frame path.
     view, loaded = console.load_frame_data(home_on, wid_on)
-    assert view is not None and loaded["spectra"]
+    assert view is not None and loaded["thought"]
     frame = console.build_frame(view, loaded, 210, 58)
     text = console.frame_text(frame)
     assert len(frame) == 58
-    assert any(row.startswith("SPECTRUM") for row in text)
-    assert any("final capture" in row for row in text)
+    assert not any("SPECTRUM" in row for row in text)
+    assert any(row.startswith("PIPELINE") for row in text)

@@ -1,9 +1,8 @@
 """The Console (0.8.0): MULTIDEX's terminal graphical system.
 
 One fixed full-screen frame that redraws in place and never
-scrolls: the tuner's spectrum with its history dripping down
-the waterfall, the pipeline of tuner, channelizer and desks
-with their real work streaming inside them, the sky panel, the
+scrolls: the pipeline of tuner, channelizer and desks with
+their real work streaming inside them, the sky panel, the
 standing pool drawn as a reservoir, the graded event feed, and
 the mind stream - the officer's own filed record, rendered as
 it files. Everything on the glass is derived from published
@@ -16,17 +15,20 @@ returns. A frame is a list of rows; a row is a list of
 width, and the frame always carries exactly the requested
 number of rows.
 
-The honesty rules are the design's. The waterfall renders
-captures as they arrive and holds the last true frame between
-captures with its age stated in its title; nothing is
+The honesty rules are the design's. Nothing on the glass is
 interpolated and no motion is invented. Panels are allotted
 from the live terminal size in the design's priority order -
-header, waterfall, pipeline, sky, pool, event feed, mind
-stream - and yield in the reverse of that order, the mind
-stream first and the waterfall last; a panel below its minimum
-disappears cleanly rather than crushing. Below the honest
-minimum size the frame withdraws to the compact status
-rendering, the same account the plain status verb gives.
+header, pipeline, sky, pool, event feed, mind stream - and
+yield in the reverse of that order, the mind stream first and
+the pipeline last; a panel below its minimum disappears
+cleanly rather than crushing. Below the honest minimum size
+the frame withdraws to the compact status rendering, the same
+account the plain status verb gives.
+
+Until 0.16.1 the frame opened with a spectrum waterfall panel
+under the header. The panel is removed in 0.16.1; each dwell's
+spectrum product remains where it has been filed since 0.10.0,
+in the snippet store as tier 1 evidence.
 """
 
 import os
@@ -36,17 +38,6 @@ from . import dashboard, displayfeed, util
 
 MIN_WIDTH = 76
 MIN_HEIGHT = 22
-
-WATER_RAMP = " ▁▂▃▄▅▆▇█"
-WATER_SPAN_DB = 48.0     # the display window above the floor
-HELD_AFTER_S = 90.0      # a frame older than this reads HELD
-# The dense render (0.16.0): the newest frame's filled plot is
-# at most this many rows tall before further rows go to
-# history, and a history row's column is a braille bar filled
-# from the cell's floor in quarter-cell steps - both drawn
-# from the frame's full bins, never its brackets.
-PLOT_MAX_ROWS = 6
-BRAILLE_BARS = [" ", "⣀", "⣤", "⣶", "⣿"]
 
 BLOCK_MIN_W = 30
 BLOCK_ROWS = 3
@@ -190,163 +181,6 @@ def _header_rows(view, width, keepawake):
                         % ("#" * filled, "-" * (bar_w - filled),
                            int(round(100 * view["progress"]))),
                         "normal")], width))
-    return rows
-
-
-# ----------------------------------------------------------- waterfall
-
-def _pooled(frame, width):
-    """A frame's bins at column resolution: max-pooled down to
-    the glass when the frame is wider, stretched by index when
-    it is narrower - the full bins, never the frame's lock
-    brackets, are what the waterfall draws (0.16.0)."""
-    bins = frame["bins"]
-    if len(bins) >= width:
-        return displayfeed.pool_bins(bins, width)
-    return [bins[min(len(bins) - 1, int(i * len(bins) / width))]
-            for i in range(width)]
-
-
-def _frame_floor(frame, pooled):
-    floor = frame.get("floor_db")
-    return min(pooled) if floor is None else floor
-
-
-def _bracket_cols(frame, width):
-    """A frame's lock brackets as (x0, x1, attr, label) column
-    spans against the frame's own span."""
-    lo, hi = frame["lo_hz"], frame["hi_hz"]
-    span = hi - lo
-
-    def col(freq):
-        return max(0, min(width - 1, int((freq - lo) / span * width)))
-
-    out = []
-    for br in frame.get("brackets") or []:
-        out.append((col(br["lo_hz"]), col(br["hi_hz"]),
-                    _grade_attr(br.get("grade")),
-                    br.get("name") or br.get("desk") or ""))
-    return out
-
-
-def _spectrum_plot(frame, width, rows):
-    """The newest spectrum as a filled curve (0.16.0): the
-    frame's full bins at column resolution, each column a bar
-    filled from the plot's floor to the bin's level with
-    eighth-row resolution - a filled area under a curve, not a
-    row of isolated marks. Lock brackets tint the filled
-    columns inside their span in the grade's colour and name
-    themselves across the plot's top row."""
-    if rows <= 0:
-        return []
-    pooled = _pooled(frame, width)
-    floor = _frame_floor(frame, pooled)
-    total = rows * 8
-    heights = []
-    for value in pooled:
-        level = (value - floor) / WATER_SPAN_DB
-        heights.append(int(round(max(0.0, min(1.0, level))
-                                 * total)))
-    grid = []
-    for r in range(rows):
-        band = rows - 1 - r  # the row's eighth-band from the floor
-        cells = []
-        for x in range(width):
-            fill = max(0, min(8, heights[x] - band * 8))
-            top = (band * 8 + fill) / float(total)
-            cells.append([WATER_RAMP[fill],
-                          "water%d" % min(7, int(top * 8))])
-        grid.append(cells)
-    for x0, x1, attr, label in _bracket_cols(frame, width):
-        for cells in grid:
-            for x in range(x0, x1 + 1):
-                if cells[x][0] != " ":
-                    cells[x][1] = attr
-        for i, ch in enumerate(label[:width - x0]):
-            grid[0][x0 + i] = [ch, attr]
-    return [[(ch, attr) for ch, attr in cells] for cells in grid]
-
-
-def _history_cells(frame, width):
-    """One older frame as a single waterfall row (0.16.0): the
-    full bins at column resolution, each column a braille bar
-    filled from the cell's floor in quarter-cell steps, so the
-    history under the live plot drips as solid columns rather
-    than scattered marks. Its lock brackets are laid over in
-    their grade's colour with the bracket's name written in
-    place, as the waterfall has always named them."""
-    pooled = _pooled(frame, width)
-    floor = _frame_floor(frame, pooled)
-    cells = []
-    for value in pooled:
-        level = max(0.0, min(1.0, (value - floor) / WATER_SPAN_DB))
-        cells.append([BRAILLE_BARS[int(round(level * 4))],
-                      "water%d" % min(7, int(level * 8))])
-    for x0, x1, attr, label in _bracket_cols(frame, width):
-        for x in range(x0, x1 + 1):
-            cells[x][1] = attr
-        for i, ch in enumerate(label[:width - x0]):
-            cells[x0 + i] = [ch, attr]
-    return [(ch, attr) for ch, attr in cells]
-
-
-def _waterfall_rows(view, feed, width, height):
-    spectra = feed["spectra"]
-    if not spectra:
-        return [_fit([("SPECTRUM", "head")], width),
-                _fit([("no capture published yet - the waterfall "
-                       "fills at the first capture the desks "
-                       "process", "dim")], width)]
-    newest = spectra[-1]
-    watch_now = view["start"] + view["elapsed_s"]
-    age = max(0.0, watch_now - newest["t"])
-    if view["status"] == "complete":
-        state = "final capture - the watch is complete"
-    elif age > HELD_AFTER_S:
-        state = "HELD - last capture %s ago" % util.fmt_duration(age)
-        cur = view.get("current")
-        if cur:
-            # Held is a statement about the glass, not the
-            # tuner: while the panel holds, it says what the
-            # tuner is actually doing (0.16.0).
-            state += " - tuner on %s" % cur["label"]
-    else:
-        state = "last capture %s ago" % util.fmt_duration(age)
-    title = "SPECTRUM - %s to %s" % (util.fmt_hz(newest["lo_hz"]),
-                                     util.fmt_hz(newest["hi_hz"]))
-    rows = [_fit([(title, "head"),
-                  (" " * max(1, width - len(title) - len(state)),
-                   "normal"),
-                  (state, "dim")], width)]
-    # The panel's body (0.16.0): the newest frame as a filled
-    # plot, the frames behind it as braille history rows, in
-    # that priority - the plot takes its rows first (deepened
-    # by any the history cannot use), at least one history row
-    # stands whenever the feed holds one and the panel has the
-    # room, and the waterfall shows what the ring holds, never
-    # more.
-    body = max(0, height - 2)
-    hist_avail = len(spectra) - 1
-    plot = min(PLOT_MAX_ROWS, body)
-    hist = min(hist_avail, body - plot)
-    if hist == 0 and hist_avail and body >= 2:
-        plot -= 1
-        hist = 1
-    plot += body - plot - hist
-    rows.extend(_spectrum_plot(newest, width, plot))
-    for frame in reversed(spectra[-1 - hist:-1] if hist else []):
-        rows.append(_history_cells(frame, width))
-    lo_label = util.fmt_hz(newest["lo_hz"])
-    hi_label = util.fmt_hz(newest["hi_hz"])
-    mid_label = util.fmt_hz((newest["lo_hz"] + newest["hi_hz"]) / 2)
-    axis = [" "] * width
-    for label, start in ((lo_label, 0),
-                         (mid_label, (width - len(mid_label)) // 2),
-                         (hi_label, width - len(hi_label))):
-        for i, ch in enumerate(label):
-            if 0 <= start + i < width:
-                axis[start + i] = ch
-    rows.append(_fit([("".join(axis), "dim")], width))
     return rows
 
 
@@ -632,7 +466,7 @@ def _compact_rows(view, width, height):
 
 # ---------------------------------------------------------------- frame
 
-_PANEL_MIN = {"waterfall": 5, "pipeline": 5, "sky": 3, "pool": 4,
+_PANEL_MIN = {"pipeline": 5, "sky": 3, "pool": 4,
               "feed": 3, "mind": 3}
 _DROP_ORDER = ("mind", "feed", "pool", "sky", "pipeline")
 
@@ -642,42 +476,38 @@ def _allot(view, feed, width, height):
     every panel at its minimum first, panels dropped from the
     bottom of the priority order when the frame cannot hold the
     minimums, then the surplus given in priority order - the
-    waterfall first (it is the instrument's face), the pipeline
-    to its full height, the feed and the mind stream to theirs,
-    and the waterfall takes whatever remains. The waterfall's
-    growth is capped by what it can draw: its filled plot's
-    rows plus the history the feed actually holds (0.16.0) - a
-    young watch with two captures does not get forty rows of
-    empty glass while desks wait below."""
+    pipeline to its full height, the event feed and the mind
+    stream to theirs, the sky panel to its account's depth, and
+    the event feed takes whatever remains: it is the frame's
+    sink, because one more row of it always shows one more
+    event of the record."""
     room = height - 5  # header 4, footer 1
     alloc = dict(_PANEL_MIN)
     for name in _DROP_ORDER:
         if sum(alloc.values()) <= room:
             break
         alloc[name] = 0
-    water_cap = 2 + PLOT_MAX_ROWS + max(0, len(feed["spectra"]) - 1)
     surplus = room - sum(alloc.values())
-    if surplus > 0 and alloc["waterfall"]:
-        take = min(12, water_cap - alloc["waterfall"], surplus)
-        alloc["waterfall"] += max(0, take)
-        surplus -= max(0, take)
     if surplus > 0 and alloc["pipeline"]:
         full = _pipeline_full_height(view, width)
         take = min(max(0, full - alloc["pipeline"]), surplus)
         alloc["pipeline"] += take
         surplus -= take
     if surplus > 0 and alloc["feed"]:
-        take = min(9 - alloc["feed"], surplus)
+        take = min(12 - alloc["feed"], surplus)
         alloc["feed"] += take
         surplus -= take
     if surplus > 0 and alloc["mind"]:
-        take = min(8 - alloc["mind"], surplus)
+        take = min(10 - alloc["mind"], surplus)
         alloc["mind"] += take
         surplus -= take
-    if surplus > 0 and alloc["waterfall"]:
-        take = min(water_cap - alloc["waterfall"], surplus)
-        alloc["waterfall"] += max(0, take)
-        surplus -= max(0, take)
+    if surplus > 0 and alloc["sky"]:
+        take = min(9 - alloc["sky"], surplus)
+        alloc["sky"] += take
+        surplus -= take
+    if surplus > 0 and alloc["feed"]:
+        alloc["feed"] += surplus
+        surplus = 0
     return alloc
 
 
@@ -696,11 +526,10 @@ def build_frame(view, feed, width, height, keepawake=None):
                 [("The officer publishes state at muster; the "
                   "console fills when it lands.", "dim")]]
         return _finish(rows, width, height, footer=True)
-    feed = feed or {"spectra": [], "work": [], "thought": []}
+    feed = feed or {"work": [], "thought": [], "sky": []}
     alloc = _allot(view, feed, width, height)
     rows = _header_rows(view, width, keepawake)
     builders = (
-        ("waterfall", lambda h: _waterfall_rows(view, feed, width, h)),
         ("pipeline", lambda h: _pipeline_rows(view, feed, width, h)),
         ("sky", lambda h: _sky_rows(feed, width, h)),
         ("pool", lambda h: _pool_rows(view, width, h)),

@@ -2,8 +2,8 @@
 
 `multidex status --live` attaches the Console to the current
 watch, and `multidex watch` on a terminal hands the screen to it
-once the watch stands. The frame itself - allotment, panels,
-waterfall - is built by the pure frame builder in console.py
+once the watch stands. The frame itself - allotment, panels -
+is built by the pure frame builder in console.py
 from the view model in dashboard.py and the display feed the
 officer publishes; this layer only draws what it is given,
 about once a second, and writes nothing to the watch. Quitting
@@ -47,13 +47,6 @@ def _palette(curses):
            "confirmed": curses.A_BOLD, "probable": 0,
            "unresolved": curses.A_DIM, "active": curses.A_BOLD,
            "benched": curses.A_DIM, "bad": curses.A_BOLD}
-    # The waterfall's intensity ramp in monochrome: intensity
-    # alone carries it, as the design requires - no fact rides
-    # colour only.
-    ramp = [curses.A_DIM, curses.A_DIM, 0, 0, curses.A_BOLD,
-            curses.A_BOLD, curses.A_BOLD, curses.A_BOLD]
-    for i, attr in enumerate(ramp):
-        pal["water%d" % i] = attr
     if curses.has_colors():
         try:
             curses.start_color()
@@ -70,14 +63,6 @@ def _palette(curses):
             pal["active"] = curses.color_pair(1) | curses.A_BOLD
             pal["benched"] = curses.color_pair(4)
             pal["bad"] = curses.color_pair(4) | curses.A_BOLD
-            ramp = [curses.A_DIM, curses.color_pair(5),
-                    curses.color_pair(3), curses.color_pair(1),
-                    curses.color_pair(2),
-                    curses.color_pair(2) | curses.A_BOLD,
-                    curses.color_pair(4),
-                    curses.color_pair(7) | curses.A_BOLD]
-            for i, attr in enumerate(ramp):
-                pal["water%d" % i] = attr
         except Exception:
             pass
     return pal

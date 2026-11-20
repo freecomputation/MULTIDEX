@@ -744,13 +744,6 @@ class RealSource:
         self.profile = profile
         self.errors = {}
         self._scan_cache = {}
-        # The display stream callback for the capture in flight
-        # (0.16.0): set by capture(), read by the points that
-        # compute a window spectrum, cleared when the capture
-        # ends. None outside a capture and whenever the officer
-        # runs with the display feed off - in which case the
-        # streaming points do no work at all.
-        self._stream = None
 
     # ------------------------------------------------------------- gates
     def available(self):
@@ -848,7 +841,6 @@ class RealSource:
             return self._scan_cache[key]
         rate = 2400000
         raw = self._iq(center_hz, rate, 262144, seconds=30)
-        taken = time.time()
         samples = []
         for i in range(0, len(raw) - 1, 2):
             samples.append(complex((raw[i] - 127.5) / 127.5,
@@ -877,11 +869,12 @@ class RealSource:
                     "label": None})
         result = {"noise_floor_db": round(floor - 60, 1),
                   "emissions": emissions,
-                  # The Console's waterfall frame for this window
-                  # (0.8.0): the same power array the peak search
-                  # just read, max-pooled to the display feed's
-                  # bin bound. No second capture, no second FFT.
-                  "display": {
+                  # The dwell's spectrum product for this window:
+                  # the same power array the peak search just
+                  # read, max-pooled to the spectrum bin bound.
+                  # The officer files it as tier 1 evidence.
+                  # No second capture, no second FFT.
+                  "spectrum": {
                       "lo_hz": center_hz - rate / 2,
                       "hi_hz": center_hz + rate / 2,
                       "floor_db": round(floor - 60, 1),
@@ -892,20 +885,6 @@ class RealSource:
                                      emissions, floor)
         if excerpt is not None:
             result["excerpts"] = [excerpt]
-        if self._stream is not None:
-            # The display stream (0.16.0): this scan's spectrum,
-            # published as it is computed, timestamped when its
-            # samples were taken. A cached scan does not publish
-            # again - it is the same measurement, and the stream
-            # carries measurements, not repetitions. Guarded:
-            # the stream can never reach back into the census.
-            try:
-                frame = dict(result["display"])
-                frame["t"] = taken
-                frame["brackets"] = []
-                self._stream(frame)
-            except Exception:
-                pass
         self._scan_cache[key] = result
         return result
 
@@ -947,12 +926,8 @@ class RealSource:
         return exc
 
     # ------------------------------------------------------------ capture
-    def capture(self, center_hz, bw_hz, t0, t1, vfos, stream=None):
-        self._stream = stream
-        try:
-            return self._capture(center_hz, bw_hz, t0, t1, vfos)
-        finally:
-            self._stream = None
+    def capture(self, center_hz, bw_hz, t0, t1, vfos):
+        return self._capture(center_hz, bw_hz, t0, t1, vfos)
 
     def _capture(self, center_hz, bw_hz, t0, t1, vfos):
         self.errors = {}
@@ -1113,7 +1088,6 @@ class RealSource:
         from . import audiocensus
         rate = 2400000
         seconds = 5.0
-        slice_t0 = time.time()
         raw = self._iq(center_hz, rate, int(rate * seconds),
                        seconds=int(seconds) + 30)
         n = len(raw) // 2
@@ -1122,9 +1096,7 @@ class RealSource:
         iq = ((u[0::2] - 127.5) / 127.5
               + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
         return audiocensus.analyze(iq, float(rate), center_hz,
-                                   extract_cap=6,
-                                   stream=self._stream,
-                                   t_start=slice_t0)
+                                   extract_cap=6)
 
     def _feed_probe(self, vfos, center_hz, bw_hz, t0, t1):
         """The probe stare on the real source (0.11.0): one
@@ -1140,7 +1112,6 @@ class RealSource:
         from . import audiocensus
         rate = 2400000
         seconds = min(20.0, max(5.0, t1 - t0))
-        slice_t0 = time.time()
         raw = self._iq(center_hz, rate, int(rate * seconds),
                        seconds=int(seconds) + 30)
         n = len(raw) // 2
@@ -1149,9 +1120,7 @@ class RealSource:
         iq = ((u[0::2] - 127.5) / 127.5
               + 1j * ((u[1::2] - 127.5) / 127.5)).astype(np.complex64)
         census = audiocensus.analyze(iq, float(rate), center_hz,
-                                     extract_cap=6,
-                                     stream=self._stream,
-                                     t_start=slice_t0)
+                                     extract_cap=6)
         cand = None
         for c in census.get("candidates") or []:
             if abs(c["freq_hz"] - center_hz) <= bw_hz / 2:
@@ -1730,12 +1699,11 @@ class TunerServer:
             raise TunerLost("tuner unavailable (configured outage)")
         return self.source.scan(center_hz, bw_hz, t0, t1)
 
-    def capture(self, center_hz, bw_hz, t0, t1, vfos, stream=None):
+    def capture(self, center_hz, bw_hz, t0, t1, vfos):
         if self.outage_overlaps(t0, t1):
             raise TunerLost("tuner unavailable (configured outage)")
         self.tune(center_hz, bw_hz)
-        return self.source.capture(center_hz, bw_hz, t0, t1, vfos,
-                                   stream=stream)
+        return self.source.capture(center_hz, bw_hz, t0, t1, vfos)
 
     def capture_errors(self):
         """Per-desk capture failures from the last capture, if the
