@@ -29,8 +29,6 @@ import math
 
 import numpy as np
 
-from . import displayfeed
-
 # Detection (020-RESEARCH.md, audio census section).
 DETECT_DB = 11.0        # threshold above the window median PSD
 EDGE_DB = 6.0           # hysteresis edge extension
@@ -55,58 +53,28 @@ EXCERPT_MAX_PER_WINDOW = 2
 
 # ------------------------------------------------------------ PSD
 
-def _welch_db(iq, fs, nperseg, block_s=None):
-    """One-sided Welch PSD in dB, fftshifted, with its freq axis.
-
-    With block_s given (the display stream, 0.16.0), the same
-    segment FFTs are also accumulated per block of block_s
-    seconds of sample time, and a third value returns the
-    blocks as (start_sample, end_sample, psd_db) triples: the
-    stream's frames are these block spectra, read off the very
-    segments the averaged PSD is built from - no second
-    transform, only a second accumulator per segment. Callers
-    that do not ask for blocks get the two-value return they
-    have always had."""
+def _welch_db(iq, fs, nperseg):
+    """One-sided Welch PSD in dB, fftshifted, with its freq axis."""
     win = np.hanning(nperseg)
     step = nperseg // 2
     acc = None
     count = 0
-    blocks = {} if block_s is not None else None
-    block_len = max(step, int(block_s * fs)) if block_s else 0
     for start in range(0, len(iq) - nperseg + 1, step):
         seg = iq[start:start + nperseg] * win
         spec = np.fft.fftshift(np.fft.fft(seg))
         p = (spec.real ** 2 + spec.imag ** 2)
         acc = p if acc is None else acc + p
         count += 1
-        if blocks is not None:
-            key = start // block_len
-            ent = blocks.get(key)
-            if ent is None:
-                blocks[key] = [p.copy(), 1]
-            else:
-                ent[0] += p
-                ent[1] += 1
     if acc is None:
         seg = np.zeros(nperseg, dtype=complex)
         seg[:len(iq)] = iq
         spec = np.fft.fftshift(np.fft.fft(seg * win))
         acc = spec.real ** 2 + spec.imag ** 2
         count = 1
-        if blocks is not None:
-            blocks = {0: [acc, 1]}
     psd = acc / count
     freqs = np.fft.fftshift(np.fft.fftfreq(nperseg, 1.0 / fs))
     out = 10.0 * np.log10(psd + 1e-20)
-    if blocks is None:
-        return freqs, out
-    blist = []
-    for key in sorted(blocks):
-        bacc, bcount = blocks[key]
-        start = key * block_len
-        blist.append((start, min(len(iq), start + block_len),
-                      10.0 * np.log10(bacc / bcount + 1e-20)))
-    return freqs, out, blist
+    return freqs, out
 
 
 def _segments(freqs, psd_db, noise_db):
@@ -454,26 +422,25 @@ def grade_audio(audio, rate, snr_db, klass, duty):
     return letter, score_i, parts
 
 
-# ------------------------------------------------- display spectrum
+# ------------------------------------------------ spectrum product
 
-DISPLAY_BINS = 240
+PRODUCT_BINS = 240
 
 
-def _display_spectrum(core_f, core_p, center_hz, noise_db):
-    """The window's magnitude spectrum for the Console's
-    waterfall (0.8.0), from the PSD this analysis already
-    computed: max-pooled to at most DISPLAY_BINS bins over the
-    analysed core span, so a narrow carrier survives the
-    reduction. No new samples, no new transform - a projection
-    of work already done, published by the officer into the
-    display feed."""
+def _spectrum_product(core_f, core_p, center_hz, noise_db):
+    """The window's magnitude spectrum product, from the PSD
+    this analysis already computed: max-pooled to at most
+    PRODUCT_BINS bins over the analysed core span, so a narrow
+    carrier survives the reduction. No new samples, no new
+    transform - a projection of work already done, filed by
+    the officer as the dwell's tier 1 spectrum evidence."""
     n = len(core_p)
     if n == 0:
         return None
-    if n > DISPLAY_BINS:
-        edges = np.linspace(0, n, DISPLAY_BINS + 1).astype(int)
+    if n > PRODUCT_BINS:
+        edges = np.linspace(0, n, PRODUCT_BINS + 1).astype(int)
         bins = [float(core_p[edges[i]:edges[i + 1]].max())
-                for i in range(DISPLAY_BINS)]
+                for i in range(PRODUCT_BINS)]
     else:
         bins = [float(v) for v in core_p]
     return {"lo_hz": float(center_hz + core_f[0]),
@@ -484,37 +451,21 @@ def _display_spectrum(core_f, core_p, center_hz, noise_db):
 
 # ------------------------------------------------------------- main
 
-def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES,
-            stream=None, t_start=None):
+def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES):
     """Census one captured window. iq: complex numpy array.
     Returns a JSON-safe dict: candidates (strongest first) with
     audio carried as int16 sample lists at AUDIO_RATE for graded
-    candidates inside the snippet caps, plus census counters.
-    Candidates past extract_cap are census rows only (grade None):
-    on the watch host the extraction FFTs are the CPU cost, so the
-    cap is a stated bound, not a silent drop.
-
-    stream, when given with t_start (the epoch the slice's first
-    samples were taken), is the display stream (0.16.0): one
-    spectrum frame per STREAM_BLOCK_S of the slice is published
-    through it as the analysis runs, each frame the block's own
-    Welch spectrum from the same segment FFTs the census
-    averages, timestamped at the block's midpoint in sample
-    time. Publication is display-only and guarded: a stream
-    failure is swallowed here, because the census's findings -
-    the record - must never feel the glass."""
+    candidates inside the snippet caps, plus census counters
+    and the window's spectrum product. Candidates past
+    extract_cap are census rows only (grade None): on the watch
+    host the extraction FFTs are the CPU cost, so the cap is a
+    stated bound, not a silent drop."""
     iq = np.asarray(iq)
     if len(iq) < 4096:
         return {"candidates": [], "carriers": 0, "over_cap": 0,
-                "noise_floor_db": None, "display": None}
+                "noise_floor_db": None, "spectrum": None}
     nperseg = 16384 if fs >= 2e6 else 4096
-    streaming = stream is not None and t_start is not None
-    if streaming:
-        freqs, psd, blocks = _welch_db(
-            iq, fs, nperseg, block_s=displayfeed.STREAM_BLOCK_S)
-    else:
-        freqs, psd = _welch_db(iq, fs, nperseg)
-        blocks = None
+    freqs, psd = _welch_db(iq, fs, nperseg)
     n = len(freqs)
     lo_i, hi_i = int(n * 0.05), int(n * 0.95)
     core_f, core_p = freqs[lo_i:hi_i], psd[lo_i:hi_i]
@@ -523,30 +474,8 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES,
     core_p = core_p.copy()
     core_p[dc] = -300.0
     noise_db = float(np.median(core_p[core_p > -299]))
-    display = _display_spectrum(core_f, core_p, center_hz, noise_db)
-    if blocks:
-        # The display stream (0.16.0): this slice's block
-        # spectra, published as the analysis runs. Each frame
-        # is its block's own measurement - the block's PSD over
-        # the analysed core span, DC-masked like the census's
-        # own, floored at the slice's noise floor the shipped
-        # display projection already uses - and says when its
-        # samples were taken. Guarded as a whole: the stream
-        # is a courtesy to a viewer, and the census below is
-        # the record.
-        try:
-            for start_s, end_s, block_p in blocks:
-                bcore = block_p[lo_i:hi_i].copy()
-                bcore[dc] = -300.0
-                bdisp = _display_spectrum(core_f, bcore,
-                                          center_hz, noise_db)
-                if bdisp is None:
-                    continue
-                bdisp["t"] = t_start + (start_s + end_s) / 2.0 / fs
-                bdisp["brackets"] = []
-                stream(bdisp)
-        except Exception:
-            pass
+    spectrum = _spectrum_product(core_f, core_p, center_hz,
+                                 noise_db)
     runs, bin_hz = _segments(core_f, core_p, noise_db)
     found = []
     carriers = 0
@@ -627,4 +556,4 @@ def analyze(iq, fs, center_hz, extract_cap=MAX_CANDIDATES,
     return {"candidates": candidates, "carriers": carriers,
             "over_cap": over_cap,
             "noise_floor_db": round(noise_db, 1),
-            "display": display}
+            "spectrum": spectrum}

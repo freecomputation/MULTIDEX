@@ -1365,8 +1365,7 @@ class WatchRunner:
         heard = {}
         try:
             feeds = self.tuner.capture(
-                item["center_hz"], item["bw_hz"], t0, t1, vfos,
-                stream=self._display_stream(item))
+                item["center_hz"], item["bw_hz"], t0, t1, vfos)
         except TunerLost as exc:
             self._file(make_event(
                 self.watch_id, "officer", "gap", t0, t1,
@@ -1501,14 +1500,11 @@ class WatchRunner:
                 self.index.add_event(ev)
             if self.display is not None:
                 # The Console's feed for this capture (0.8.0):
-                # each desk's own output lines, then the capture's
-                # spectrum frame with the brackets this batch
-                # declared. Best-effort, outside the record.
+                # each desk's own output lines. Best-effort,
+                # outside the record.
                 for desk_name, lines in work_lines.items():
                     for line in lines[-4:]:
                         self.display.work(t1, desk_name, line)
-                self._publish_display_frame(item, feeds, new_events,
-                                            t1)
         self._update_sky_runtime(new_events)
         self._publish_sky(t1)
         dwell_ev = make_event(
@@ -1581,54 +1577,27 @@ class WatchRunner:
         except Exception:
             pass
 
-    def _display_stream(self, item):
-        """The capture's live spectrum stream (0.16.0): a
-        callback the tuner source invokes with spectrum frames
-        while the capture runs, published straight into the
-        display feed under this item's context and with no
-        brackets - no desk has filed yet, so there is nothing
-        to bracket; the capture's final frame, published at
-        completion, carries them. None when the feed is off, in
-        which case the source does no streaming work at all.
-        Publishing rides the feed's own best-effort path, so a
-        frame that fails to publish is lost and never felt by
-        the watch - the stream observes the capture, it does
-        not drive it, and the event record is identical with
-        the stream running or not."""
-        if self.display is None or not self.display.enabled:
-            return None
-        display = self.display
-
-        def stream(frame):
-            display.spectrum({
-                "t": frame.get("t") or 0.0,
-                "bill_id": item["id"], "label": item["label"],
-                "kind": item["kind"],
-                "lo_hz": frame["lo_hz"], "hi_hz": frame["hi_hz"],
-                "floor_db": frame.get("floor_db"),
-                "bins": frame["bins"], "brackets": []})
-
-        return stream
-
     def _file_spectrum(self, item, feeds, dwell_ev, t0):
         """File this dwell's spectrum product as tier 1 evidence
-        (0.10.0): the same display projection the Console's
-        waterfall reads - the sweep scan's own power array on a
-        sweep item, otherwise the audio census slice's PSD - kept
-        in the snippet store under the dwell event as the dwell's
-        band state, permanently. It is a few kilobytes by
-        construction and files under the item's own grant. A
-        capture that produced neither files nothing, as the
-        waterfall holds its last frame."""
+        (0.10.0): the capture's own spectrum projection - the
+        sweep scan's own power array on a sweep item, otherwise
+        the audio census slice's PSD - kept in the snippet store
+        under the dwell event as the dwell's band state,
+        permanently. It is a few kilobytes by construction and
+        files under the item's own grant. A capture that
+        produced neither files nothing. Until 0.16.1 the Console's
+        waterfall read this same projection through the display
+        feed; the panel and that publication are removed, and
+        this evidence path is unchanged."""
         import base64 as _b64
         import json as _json
         disp = None
         desk = None
         if item["kind"] == "sweep":
-            disp = (feeds.get("sweep") or {}).get("display")
+            disp = (feeds.get("sweep") or {}).get("spectrum")
             desk = "sweep"
         if disp is None:
-            disp = (feeds.get("audiocensus") or {}).get("display")
+            disp = (feeds.get("audiocensus") or {}).get("spectrum")
             desk = "audiocensus"
         if not disp:
             return
@@ -1642,44 +1611,6 @@ class WatchRunner:
                        record, sort_keys=True).encode(
                        "utf-8")).decode("ascii")}
         self._file_snippet(dwell_ev, desk, item["id"], payload)
-
-    def _publish_display_frame(self, item, feeds, events, t1):
-        """One capture's spectrum frame for the Console (0.8.0).
-
-        The spectrum is whichever display projection the capture
-        already produced: the sweep scan's own power array on a
-        sweep item, otherwise the audio census slice's PSD, which
-        rides every captured window. A capture that produced
-        neither - a satellite pass, whose feed is audio - publishes
-        no frame, and the waterfall holds the last true frame with
-        its age advancing, which is the design's stated behaviour
-        between captures. Brackets are this batch's own events
-        whose frequencies fall inside the frame's span: the desks
-        declared them by filing them."""
-        disp = None
-        if item["kind"] == "sweep":
-            disp = (feeds.get("sweep") or {}).get("display")
-        if disp is None:
-            disp = (feeds.get("audiocensus") or {}).get("display")
-        if not disp:
-            return
-        lo_hz, hi_hz = disp["lo_hz"], disp["hi_hz"]
-        bin_hz = (hi_hz - lo_hz) / max(1, len(disp["bins"]))
-        brackets = []
-        for ev in events:
-            freq = ev.get("freq_hz")
-            if freq is None or not lo_hz <= freq <= hi_hz:
-                continue
-            bw = (ev.get("data") or {}).get("bw_hz") or bin_hz
-            brackets.append({
-                "desk": ev.get("desk"), "name": ev.get("emitter"),
-                "grade": ev.get("grade"), "freq_hz": freq,
-                "lo_hz": freq - bw / 2.0, "hi_hz": freq + bw / 2.0})
-        self.display.spectrum({
-            "t": t1, "bill_id": item["id"], "label": item["label"],
-            "kind": item["kind"], "lo_hz": lo_hz, "hi_hz": hi_hz,
-            "floor_db": disp.get("floor_db"), "bins": disp["bins"],
-            "brackets": brackets})
 
     def _adopt_snippet(self, ev, desk, bill_id):
         payload = ev["data"].pop("_snippet", None)

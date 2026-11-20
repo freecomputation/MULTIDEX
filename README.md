@@ -14,7 +14,7 @@ touches a network. The system core is the Python 3 standard library
 the reference host, and file their absence as stated capture gaps
 where it is missing. It runs on modest hardware.
 
-Version 0.16.0.
+Version 0.16.1.
 
 ## The verbs
 
@@ -39,12 +39,12 @@ anything it cannot get is a refusal with the reason in plain words.
   gone is reported as not running and named as interrupted, and a
   watch folder with no state file is never reported as running.
   `multidex status --live` attaches the Console to the current
-  watch: a full-screen live frame holding the spectrum waterfall,
-  the pipeline of tuner, channelizer and desks with their work
-  streaming inside them, the sky panel, the standing pool, the
-  event feed and the officer's mind stream, refreshed about once
-  a second from the watch's recorded state and the display feed
-  it publishes (see The console, below). The view is read-only
+  watch: a full-screen live frame holding the pipeline of tuner,
+  channelizer and desks with their work streaming inside them,
+  the sky panel, the standing pool, the event feed and the
+  officer's mind stream, refreshed about once a second from
+  the watch's recorded state and the display feed it publishes
+  (see The console, below). The view is read-only
   and quitting it (q or Ctrl-C) never affects the watch; a
   completed watch renders its final account, marked complete.
   Without an interactive terminal or curses, it prints the reason
@@ -824,63 +824,49 @@ inside.
 The Console (0.8.0) is the system's terminal graphical face:
 one fixed full-screen frame, redrawn in place about once a
 second, that never scrolls. Its panels stand in a fixed
-priority order - header, waterfall, pipeline, sky panel, pool,
-event feed, mind stream - allotted from the live terminal size
+priority order - header, pipeline, sky panel, pool, event
+feed, mind stream - allotted from the live terminal size
 on every refresh, each clipping hard to its allotment, yielding
 in reverse priority order when space runs short, and withdrawn
 to the compact status rendering below an honest minimum size.
+The pipeline stands first under the header and takes the
+frame's growth first; the event feed takes whatever remains
+after the other panels reach theirs.
 
-The waterfall renders each capture's magnitude spectrum as it
-arrives, newest at the top, history dripping down and cooling,
-with lock brackets named in place where the desks' filings fall
-inside the span. The newest spectrum draws as a filled curve
-from the frame's full bins at column resolution, with eighth-row
-resolution under the curve, and the history behind it drips as
-braille columns filled from each cell's floor (0.16.0) - the
-frames' lock brackets are an overlay, never the drawing. It
-shows captures, never a fiction of continuity: between captures
-it holds the last true frame with its age stated, a frame older
-than ninety seconds reads HELD, and a held panel says what the
-tuner is actually doing while it holds. The pipeline shows the
-tuner, the channelizer and every
+The pipeline shows the tuner, the channelizer and every
 desk as blocks carrying their state and their real output as it
 files; a benched desk shows its bench reason, and an interrupt
 names the item it displaced. The mind stream is the officer's
 own filed record rendered as it files: muster verdicts, grants
 and refusals, benchings, FLASH raisings, update handovers. The
 pool block draws the standing allocation ledger as a reservoir
-with this watch's slice marked. The sky panel stands in the
-frame with an honest benched statement until the astronomical
-patch brings its data.
+with this watch's slice marked. The sky panel renders the
+officer's sky records - sidereal time, Jupiter's windows, the
+solar state, the meteor rate, the sonde account - and states
+plainly that none has been published until the first lands.
+
+Until 0.16.1 the frame opened with a spectrum waterfall panel
+under the header, fed by spectrum frames the officer published
+into the display feed and streamed while captures ran. The
+panel, its feed ring and the streaming behind it are removed
+in 0.16.1. Nothing of the record went with them: each dwell's
+spectrum product is still computed from the capture's own
+samples - the audio census desk's Welch spectrum or the sweep
+scan's power array, max-pooled to at most 240 bins - and filed
+by the officer in the snippet store as tier 1 evidence, as it
+has been since 0.10.0.
 
 The officer publishes a bounded display feed for the Console
-inside the watch folder: spectrum frames (computed from samples
-the watch already took - the audio census desk's Welch spectrum
-or the sweep scan's power array, max-pooled to at most 240
-bins), per-desk work lines, and the officer's thought lines,
-each ring capped so the whole feed stays well under a megabyte.
-Since 0.16.0 the spectrum frames stream while a capture runs,
-not only when it completes: the simulated source publishes a
-frame every five seconds of dwell time, rendered from its world
-model at that instant, and the real source publishes at the
-points its capture path samples the window - the scan's frame
-as the scan computes it, and one frame per half-second of the
-census desk's window slice, read off the same Welch segments
-the census itself averages, so streaming adds no second
-transform and no capture of its own. One final frame per
-capture still lands at completion, carrying the lock brackets
-the desks filed. The spectra ring holds forty frames, so at
-streaming cadence the waterfall's history is cadence-dependent:
-inside one long dwell the ring turns over and holds only that
-dwell's most recent frames - a twenty-second probe stare can
-fill it alone - and the waterfall shows what the ring holds,
-never more. The feed is not part of the watch's record,
-publishing is best-effort and can never reach the watch, and
-the profile's advanced `display_feed` key can turn it off, in
-which case the watch files an identical event record and the
-Console renders from state and Index alone. The Console itself
-is a pure viewer: it writes nothing to the watch, and quitting,
-resizing or killing it leaves the watch exactly as it was.
+inside the watch folder: per-desk work lines, the officer's
+thought lines, and the sky records, each ring capped so the
+whole feed stays well under a megabyte. The feed is not part
+of the watch's record, publishing is best-effort and can never
+reach the watch, and the profile's advanced `display_feed` key
+can turn it off, in which case the watch files an identical
+event record and the Console renders from state and Index
+alone. The Console itself is a pure viewer: it writes nothing
+to the watch, and quitting, resizing or killing it leaves the
+watch exactly as it was.
 
 With `--keep-awake` (on `status --live` or `watch`) the
 Console holds the display awake while it runs and releases the
